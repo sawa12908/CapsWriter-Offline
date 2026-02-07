@@ -1,0 +1,16 @@
+# 语音热词快捷键映射配置文件
+# 格式：语音指令 = 快捷键组合
+# 快捷键支持：ctrl, alt, shift, win, enter, tab, space, f1-f12, 字母, 数字
+# 组合键用 + 连接
+
+# 示例：
+# 打开微信 = ctrl+alt+w
+# 截图 = ctrl+alt+a
+# 复制 = ctrl+c
+# 粘贴 = ctrl+v
+
+测试保存 = ctrl+s
+打开我的电脑 = win+e
+搜索已完成 = 已投递 >> enter
+补录归档 = 上面的对话又没做MCP归档 每一条对话都必须调用MCP归档 绝对不要再忘记 把上面没写MCP归档的补上 >> shift+enter >> f11
+换行 = shift+enter

@@ -132,7 +132,7 @@ dmypy.json
 .pyre/
 
 # pytype 静态分析缓存
-.pytype/
+.pyre/
 
 # Cython 调试符号
 cython_debug/
@@ -146,8 +146,7 @@ cython_debug/
 # --- 本项目特定忽略 ---
 
 # 模型文件（体积巨大，只保留下载链接）
-models/*/*/
-models/*.py
+models/
 
 # 日志与按年归档的文件夹（如 2026/01/...）
 20*/
@@ -163,8 +162,6 @@ logs/
 # 运行生成的临时文件 / 二进制
 *.exe
 *.log
-
-
 
 # 本地配置文件
 .claude
@@ -187,4 +184,3 @@ file_*.txt
 
 release
 *.dll 
-*.exe
