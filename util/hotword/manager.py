@@ -71,11 +71,14 @@ class HotwordManager:
             'hot': Path('hot.txt'),
             'rule': Path('hot-rule.txt'),
             'rectify': Path('hot-rectify.txt'),
+            'shortcut': Path('hot-shortcut.txt'),
         }
         
         self.threshold = threshold
         self.similar_threshold = similar_threshold
         self.rectify_threshold = rectify_threshold
+        
+        self.shortcuts: Dict[str, str] = {}  # 快捷键映射表
         
         # 初始化各个组件
         self.phoneme_corrector = PhonemeCorrector(threshold=threshold, similar_threshold=similar_threshold)
@@ -111,6 +114,7 @@ class HotwordManager:
         self._load_hot()
         self._load_rule()
         self._load_rectify()
+        self._load_shortcut()
         logger.info("热词资源加载完成")
 
     def _read_file(self, key: str) -> str:
@@ -129,9 +133,13 @@ class HotwordManager:
             return ""
 
     def _load_hot(self) -> None:
-        content = self._read_file('hot')
-        num = self.phoneme_corrector.update_hotwords(content)
-        console.print(self._format_msg("热词库", "hot.txt", num))
+        # 复用 _reload_hot_with_shortcuts 逻辑，确保 shortcuts 总是包含在内
+        self._reload_hot_with_shortcuts()
+        # count 由 _reload 打印还是这里打印？update_hotwords 返回总数。
+        # 为了界面一致性，我们还是计算 hot.txt 的行数用于显示
+        hot_content = self._read_file('hot')
+        raw_count = len([x for x in hot_content.splitlines() if x.strip() and not x.strip().startswith('#')])
+        console.print(self._format_msg("热词库", "hot.txt", raw_count))
 
     def _load_rule(self) -> None:
         content = self._read_file('rule')
@@ -144,6 +152,80 @@ class HotwordManager:
         count = len(self.rectify_rag.records) if hasattr(self.rectify_rag, 'records') else 0
         console.print(self._format_msg("纠错历史", "hot-rectify.txt", count))
 
+    def _load_shortcut(self) -> None:
+        """加载快捷键配置并注册热词"""
+        content = self._read_file('shortcut')
+        new_shortcuts = {}
+        hotwords_to_add = [] # 收集快捷键触发词作为热词
+
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            # 解析 触发词 = 快捷键
+            parts = line.split('=', 1)
+            if len(parts) == 2:
+                trigger = parts[0].strip()
+                keys = parts[1].strip()
+                if trigger and keys:
+                    new_shortcuts[trigger] = keys
+                    hotwords_to_add.append(trigger)
+
+        with threading.Lock(): # 使用简单的锁保护，或者依赖 self._lock 如果需要
+            self.shortcuts = new_shortcuts
+            
+            # 将触发词注入到 PhonemeCorrector 中以便模糊匹配
+            # 注意：update_hotwords 是全量更新，我们这里通过追加方式合并到现有热词
+            # 但 PhonemeCorrector.update_hotwords 设计为全量加载文件内容
+            # 所以为了不破坏原逻辑，我们最好是不直接干扰 hot.txt 的加载流程
+            # 而是让 PhonemeCorrector 能够支持增量添加，或者在 _load_hot 时一并将 shortcuts 的 key 加进去
+            pass
+
+        # 变通方案：每次 _load_hot 时其实会清空。
+        # 这里我们修改策略：让 PhonemeCorrector 维护两份数据，或者在 _load_hot 的时候读完 hot.txt 后，再把 shortcuts 的 key 拼上去？
+        # 更简单的做法：直接在这里调用 phoneme_corrector 的底层 add 方法（如果有），或者重新设计 update_hotwords
+        # 查看 PhonemeCorrector 代码发现 update_hotwords 是重置 self.hotwords。
+        # 为了避免复杂修改，我们在 PhonemeCorrector 中增加一个 add_hotwords_incremental 方法，或者
+        # 简单暴力点：把 hot.txt 内容读取出来，加上 shortcuts 的 keys，一起传给 update_hotwords？
+        # 不行，这样 _load_hot 和 _load_shortcut 会打架。
+        
+        # 最佳方案：让 _load_shortcut 更新 self.shortcuts 后，调用 update_hotwords_with_shortcuts
+        # 但这需要修改 _load_hot。
+        
+        # 让我们先在 PhonemeCorrector 中加个 add_hotwords 方法（它已有 self.fast_rag.add_hotwords）
+        # 但 self.hotwords 字典也需要更新。
+        
+        # 实际上 PhonemeCorrector.update_hotwords 是：
+        # 1. 解析文本 -> new_hotwords 字典
+        # 2. 覆盖 self.hotwords
+        # 3. 重建 FastRAG
+        
+        # 我们可以修改 _load_hot，让它在读取 hot.txt 后，自动合并 self.shortcuts 的 keys。
+        # 这样 _load_shortcut 只需更新 self.shortcuts，然后由 _load_hot 来应用。
+        # 但如果只改了 shortcut.txt 不改 hot.txt，就不会触发 _load_hot。
+        # 所以 _load_shortcut 必须主动触发一次合并更新。
+        
+        # 决定：修改 _load_hot 逻辑，使其总是 = hot.txt + shortcuts.keys()
+        # 然后 _load_shortcut调用 _load_hot。
+        
+        console.print(self._format_msg("快捷指令", "hot-shortcut.txt", len(new_shortcuts)))
+        
+        # 触发热词库更新以包含快捷键触发词
+        self._reload_hot_with_shortcuts()
+
+    def _reload_hot_with_shortcuts(self):
+        """重新加载 hot.txt 并合并快捷键触发词"""
+        hot_content = self._read_file('hot')
+        
+        # 将快捷键触发词追加到文本末尾
+        shortcut_triggers = "\n# --- Shortcuts ---\n" + "\n".join(self.shortcuts.keys())
+        full_content = hot_content + shortcut_triggers
+        
+        num = self.phoneme_corrector.update_hotwords(full_content)
+        # console.print 已在 _load_hot/shortcut 中打印，这里略过或打印总数
+
+
     def get_phoneme_corrector(self) -> PhonemeCorrector:
         return self.phoneme_corrector
 
@@ -152,6 +234,9 @@ class HotwordManager:
 
     def get_rectify_rag(self) -> RectificationRAG:
         return self.rectify_rag
+
+    def get_shortcuts(self) -> Dict[str, str]:
+        return self.shortcuts
 
     def start_file_watcher(self) -> Any:
         """启动文件监视"""
@@ -200,6 +285,7 @@ class _HotwordFileHandler(FileSystemEventHandler):
             m.files['hot'].name: m._load_hot,
             m.files['rule'].name: m._load_rule,
             m.files['rectify'].name: m._load_rectify,
+            m.files['shortcut'].name: m._load_shortcut,
         }
 
     def on_modified(self, event):

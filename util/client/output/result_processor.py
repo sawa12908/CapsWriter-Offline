@@ -121,6 +121,64 @@ class ResultProcessor:
                 
         except Exception as e:
             logger.debug(f"检测按键状态失败: {e}")
+
+    def _trigger_shortcut(self, keys_str: str) -> None:
+        """
+        解析并执行快捷键组合
+        
+        Args:
+            keys_str: 快捷键字符串，如 "ctrl+alt+w"
+        """
+        try:
+            from util.client.shortcut.emulator import ShortcutEmulator
+            from util.client.shortcut.key_mapper import KeyMapper
+            
+            # 使用现有模拟器或新建一个
+            if hasattr(self.state, 'shortcut_manager') and hasattr(self.state.shortcut_manager, '_emulator'):
+                 emulator = self.state.shortcut_manager._emulator
+            else:
+                 emulator = ShortcutEmulator()
+
+            # 解析按键组合
+            keys = [k.strip().lower() for k in keys_str.split('+')]
+            
+            # 1. 如果是当个按键
+            if len(keys) == 1:
+                emulator.emulate_key(keys[0])
+                return
+
+            # 2. 如果是组合键 (需手动处理修饰键逻辑，因为 emulator.emulate_key 是单键按压)
+            # 我们这里直接使用 pynput Controller 来实现组合键
+            import pynput.keyboard
+            controller = pynput.keyboard.Controller()
+            
+            # 将字符串转换为 pynput Key 对象
+            key_objects = []
+            for k in keys:
+                obj = KeyMapper.name_to_key(k)
+                if obj:
+                    key_objects.append(obj)
+                else:
+                    logger.warning(f"无法识别的快捷键按键: {k}")
+            
+            if not key_objects: return
+
+            # 按下所有修饰键
+            for k in key_objects[:-1]:
+                controller.press(k)
+            
+            # 按下并释放主键
+            controller.press(key_objects[-1])
+            controller.release(key_objects[-1])
+            
+            # 反向释放修饰键
+            for k in reversed(key_objects[:-1]):
+                controller.release(k)
+                
+            logger.debug(f"快捷键模拟完成: {keys_str}")
+
+        except Exception as e:
+            logger.error(f"执行快捷键失败 {keys_str}: {e}")
     
     async def process_loop(self) -> None:
         """主处理循环"""
@@ -248,6 +306,52 @@ class ResultProcessor:
         correction_result = self._hotword_manager.get_phoneme_corrector().correct(text, k=10)
         if Config.hot:
             text = correction_result.text
+
+        # 1.2 预处理文本（去除标点），方便后续匹配快捷键
+        clean_text = TextOutput.strip_punc(text)
+
+        # 1.5 检查是否触发快捷键
+        shortcuts = self._hotword_manager.get_shortcuts()
+        if clean_text in shortcuts:
+            shortcut_val = shortcuts[clean_text]
+            logger.info(f"触发语音快捷键: {clean_text} -> {shortcut_val}")
+            
+            # 支持多步序列: 文字 >> 快捷键1 >> 快捷键2 ...
+            steps = [s.strip() for s in shortcut_val.split(' >> ')]
+            
+            if len(steps) > 1:
+                # 1. 第一部分作为预置文字输出
+                prefix_text = steps[0]
+                if prefix_text:
+                    import keyboard as native_keyboard
+                    native_keyboard.write(prefix_text)
+                    logger.debug(f"输出预置文字: {prefix_text}")
+                
+                # 2. 后续部分作为快捷键顺序执行
+                for i in range(1, len(steps)):
+                    shortcut_keys = steps[i]
+                    if shortcut_keys:
+                        console.print(f'    [bold magenta]步骤 {i} 执行快捷键：{shortcut_keys}[/]')
+                        self._trigger_shortcut(shortcut_keys)
+                        # 如果有多个快捷键，中间稍作停顿以保证系统响应
+                        if i < len(steps) - 1:
+                            import time
+                            time.sleep(0.05)
+            else:
+                # 仅单个快捷键
+                shortcut_keys = steps[0]
+                console.print(f'    [bold magenta]执行快捷键：{clean_text} -> {shortcut_keys}[/]')
+                self._trigger_shortcut(shortcut_keys)
+            
+            console.line()
+            return  # 阻止后续文本输出和 LLM 处理
+            
+            # 播放提示音（可选）
+            # import winsound
+            # winsound.Beep(1000, 100)
+            
+            console.line()
+            return  # 阻止后续文本输出和 LLM 处理
 
         # 2. 规则纠错
         text = self._hotword_manager.get_rule_corrector().substitute(text)

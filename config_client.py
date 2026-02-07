@@ -24,6 +24,13 @@ class ClientConfig:
             'enabled': True         # 启用此快捷键
         },
         {
+            'key': 'f13',
+            'type': 'keyboard',
+            'suppress': True,
+            'hold_mode': True,
+            'enabled': True
+        },
+        {
             'key': 'x2',
             'type': 'mouse',
             'suppress': True,

@@ -83,6 +83,9 @@ class KeyMapper:
                 'f1': keyboard.Key.f1, 'f2': keyboard.Key.f2, 'f3': keyboard.Key.f3, 'f4': keyboard.Key.f4,
                 'f5': keyboard.Key.f5, 'f6': keyboard.Key.f6, 'f7': keyboard.Key.f7, 'f8': keyboard.Key.f8,
                 'f9': keyboard.Key.f9, 'f10': keyboard.Key.f10, 'f11': keyboard.Key.f11, 'f12': keyboard.Key.f12,
+                'f13': keyboard.Key.f13, 'f14': keyboard.Key.f14, 'f15': keyboard.Key.f15, 'f16': keyboard.Key.f16,
+                'f17': keyboard.Key.f17, 'f18': keyboard.Key.f18, 'f19': keyboard.Key.f19, 'f20': keyboard.Key.f20,
+                'f21': keyboard.Key.f21, 'f22': keyboard.Key.f22, 'f23': keyboard.Key.f23, 'f24': keyboard.Key.f24,
             }
         return cls._SPECIAL_KEY_OBJECTS
 

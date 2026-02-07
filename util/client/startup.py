@@ -107,6 +107,7 @@ def setup_client_components(base_dir):
         'hot': Path('hot.txt'),
         'rule': Path('hot-rule.txt'),
         'rectify': Path('hot-rectify.txt'),
+        'shortcut': Path('hot-shortcut.txt'),
     }
     hotword_manager = get_hotword_manager(
         hotword_files=hotword_files,
