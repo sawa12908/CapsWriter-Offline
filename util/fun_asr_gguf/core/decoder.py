@@ -88,6 +88,7 @@ class LLMDecoder:
 
         current_pos = n_input_tokens
         asr_decoder = llama.ASRStreamDecoder(self.models.vocab, reporter if stream_output else None)
+        fuse_triggered = False
         
         with llama.LlamaSampler(temperature=temperature, top_k=top_k, top_p=top_p) as smpl:
             for _ in range(n_predict):
@@ -105,8 +106,14 @@ class LLMDecoder:
                 asr_decoder.push(token_id)
                 if len(asr_decoder.generated_text) > 10: 
                     if len(set(asr_decoder.generated_text[-10:])) == 1:
-                        generated_text += "解码异常，强制熔断，可能是 DML 或 Vulkan 不兼容，可到 config_server.py 中关闭 DML 或 Vulkan 看能否解决"
+                        fuse_msg = "解码异常，强制熔断，可能是 DML 或 Vulkan 不兼容，可到 config_server.py 中关闭 DML 或 Vulkan 看能否解决"
+                        fuse_triggered = True
+                        logger.error(fuse_msg)
                         break
+
+        if fuse_triggered:
+            t_gen = time.perf_counter() - t_gen_start
+            return "", asr_decoder.tokens_generated, t_inject, t_gen
 
         asr_decoder.flush()
 
@@ -255,4 +262,3 @@ class StreamDecoder:
             audio_embd=audio_embd, n_prefix=n_p, n_suffix=n_s,
             n_gen=n_gen, timings=timings, hotwords=hotwords
         )
-

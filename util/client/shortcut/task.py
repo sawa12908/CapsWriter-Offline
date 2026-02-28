@@ -63,9 +63,27 @@ class ShortcutTask:
             self._recorder_class = AudioRecorder
         return self._recorder_class(self.state)
 
+    def _sync_stream_with_system_default(self) -> None:
+        """Start-record fast path: ensure stream follows current system default input."""
+        stream_manager = getattr(self.state, "stream_manager", None)
+        if stream_manager is None:
+            return
+
+        sync_fn = getattr(stream_manager, "ensure_default_input_synced", None)
+        if not callable(sync_fn):
+            return
+
+        try:
+            sync_fn(reason=f"shortcut:{self.shortcut.key}:before-record")
+        except Exception as e:
+            logger.debug(f"[{self.shortcut.key}] sync default input skipped: {e}")
+
     def launch(self) -> None:
         """启动录音任务"""
         logger.info(f"[{self.shortcut.key}] 触发：开始录音")
+
+        # Keep selected system input in sync even if OS broadcast event is missed.
+        self._sync_stream_with_system_default()
 
         # 记录开始时间
         self.recording_start_time = time.time()
@@ -133,3 +151,4 @@ class ShortcutTask:
             manager.schedule_restore(self.shortcut.key)
         else:
             logger.warning(f"[{self.shortcut.key}] manager 引用丢失，无法 restore")
+

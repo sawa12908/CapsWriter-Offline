@@ -151,8 +151,15 @@ def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id, stdin_fn):
             logger.debug(f"任务所属连接已断开，跳过处理，任务ID: {task.task_id}")
             continue
 
-        result = recognize(recognizer, punc_model, task)   # 执行识别
-        queue_out.put(result)      # 返回结果
+        try:
+            result = recognize(recognizer, punc_model, task)   # 执行识别
+            queue_out.put(result)      # 返回结果
+        except Exception as e:
+            logger.error(
+                f"任务识别失败，已跳过本任务: task_id={getattr(task, 'task_id', 'unknown')}, err={e}",
+                exc_info=True
+            )
+            continue
 
     # 清理完成
     logger.info("识别子进程已退出")
