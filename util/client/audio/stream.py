@@ -837,6 +837,23 @@ class AudioStreamManager:
                 if stream is not None:
                     return stream
 
+            preferred_name = None
+            try:
+                from config_client import ClientConfig as Config
+                preferred_name = getattr(Config, "mic_preferred_input_name", None)
+            except Exception:
+                preferred_name = None
+
+            if preferred_name:
+                stream = self.open(
+                    preferred_input_name=preferred_name,
+                    fallback_to_default=False,
+                    allow_first_available_fallback=False,
+                )
+                if stream is not None:
+                    return stream
+                logger.warning(f"preferred input unavailable during reopen: {preferred_name}, fallback to default")
+
             stream = self.open(allow_first_available_fallback=not strict_default_follow)
             if stream is not None:
                 return stream

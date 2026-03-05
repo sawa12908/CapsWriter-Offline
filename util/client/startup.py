@@ -127,7 +127,21 @@ def setup_client_components(base_dir):
     logger.info("正在打开音频流...")
     stream_manager = AudioStreamManager(state)
     state.stream_manager = stream_manager
-    stream_manager.open()
+    if getattr(Config, 'keep_mic_stream_open', True):
+        preferred_name = getattr(Config, 'mic_preferred_input_name', None)
+        if preferred_name:
+            stream = stream_manager.open(
+                preferred_input_name=preferred_name,
+                fallback_to_default=False,
+                allow_first_available_fallback=False,
+            )
+            if stream is None:
+                logger.warning(f"preferred input unavailable at startup: {preferred_name}, fallback to default")
+                stream_manager.open()
+        else:
+            stream_manager.open()
+    else:
+        logger.info("microphone stream lazy mode enabled; idle will not occupy mic")
 
     # 6. 快捷键管理器（统一管理键盘和鼠标快捷键）
     # 从 Config.shortcuts 列表创建 Shortcut 对象
@@ -155,4 +169,3 @@ def setup_client_components(base_dir):
 
     logger.info("客户端初始化完成，等待语音输入...")
     return state
-

@@ -293,6 +293,18 @@ class ResultProcessor:
         if not message['is_final']:
             return
 
+        sil_raw = str(text).strip().lower()
+        sil_clean = TextOutput.strip_punc(str(text)).strip().lower()
+        if sil_raw in {'/sil', 'sil', '[sil]', '<sil>'} or sil_clean in {'/sil', 'sil'}:
+            logger.info("忽略静音识别结果 /sil")
+            file_path = self.state.pop_audio_file(message.get('task_id'))
+            if file_path:
+                try:
+                    file_path.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.debug(f"删除静音音频文件失败: {e}")
+            return
+
         # 繁体转换
         if Config.traditional_convert:
             try:

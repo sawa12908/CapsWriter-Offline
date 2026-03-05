@@ -10,6 +10,7 @@ import time
 from threading import Event
 from typing import TYPE_CHECKING, Optional
 
+from config_client import ClientConfig as Config
 from . import logger
 from util.tools.my_status import Status
 
@@ -63,8 +64,11 @@ class ShortcutTask:
             self._recorder_class = AudioRecorder
         return self._recorder_class(self.state)
 
-    def _sync_stream_with_system_default(self) -> None:
-        """Start-record fast path: ensure stream follows current system default input."""
+    def _sync_stream_with_system_default(self, stage: str = "after-record") -> None:
+        """Ensure stream follows current system default input at a non-critical stage."""
+        if not getattr(Config, "keep_mic_stream_open", True):
+            return
+
         stream_manager = getattr(self.state, "stream_manager", None)
         if stream_manager is None:
             return
@@ -74,16 +78,71 @@ class ShortcutTask:
             return
 
         try:
-            sync_fn(reason=f"shortcut:{self.shortcut.key}:before-record")
+            sync_fn(reason=f"shortcut:{self.shortcut.key}:{stage}")
         except Exception as e:
             logger.debug(f"[{self.shortcut.key}] sync default input skipped: {e}")
+
+    def _ensure_stream_ready(self) -> None:
+        """
+        Open input stream on demand when not running.
+        This avoids holding Bluetooth hands-free profile while idle.
+        """
+        stream_manager = getattr(self.state, "stream_manager", None)
+        if stream_manager is None:
+            return
+
+        if getattr(self.state, "stream", None) is not None:
+            return
+
+        try:
+            logger.info(f"[{self.shortcut.key}] opening microphone stream on demand")
+            preferred_name = getattr(Config, "mic_preferred_input_name", None)
+            if preferred_name:
+                stream = stream_manager.open(
+                    preferred_input_name=preferred_name,
+                    fallback_to_default=False,
+                    allow_first_available_fallback=False,
+                )
+                if stream is None:
+                    logger.warning(
+                        f"[{self.shortcut.key}] preferred input unavailable: {preferred_name}, fallback to default"
+                    )
+                    stream_manager.open()
+            else:
+                stream_manager.open()
+        except Exception as e:
+            logger.warning(f"[{self.shortcut.key}] failed to open microphone stream: {e}")
+
+    def _release_stream_when_idle(self, stage: str) -> None:
+        """
+        Release input stream after record when configured.
+        """
+        if getattr(Config, "keep_mic_stream_open", True):
+            return
+
+        if self.state.recording:
+            return
+
+        stream_manager = getattr(self.state, "stream_manager", None)
+        if stream_manager is None:
+            return
+
+        if getattr(self.state, "stream", None) is None:
+            return
+
+        try:
+            stream_manager.close()
+            logger.info(f"[{self.shortcut.key}] microphone stream released ({stage})")
+        except Exception as e:
+            logger.warning(f"[{self.shortcut.key}] failed to release microphone stream: {e}")
 
     def launch(self) -> None:
         """启动录音任务"""
         logger.info(f"[{self.shortcut.key}] 触发：开始录音")
 
-        # Keep selected system input in sync even if OS broadcast event is missed.
-        self._sync_stream_with_system_default()
+        # Start recording immediately on hotkey trigger to avoid clipping the first seconds.
+        self._sync_stream_with_system_default(stage="before-record")
+        self._ensure_stream_ready()
 
         # 记录开始时间
         self.recording_start_time = time.time()
@@ -119,6 +178,10 @@ class ShortcutTask:
         self.task.cancel()
         self.task = None
 
+        # Keep stream/device sync behavior consistent even on short-cancel paths.
+        self._sync_stream_with_system_default(stage="after-cancel")
+        self._release_stream_when_idle(stage="after-cancel")
+
     def finish(self) -> None:
         """完成录音任务"""
         logger.info(f"[{self.shortcut.key}] 释放：完成录音")
@@ -135,6 +198,11 @@ class ShortcutTask:
             }),
             self.state.loop
         )
+
+        # Sync input stream after the current record so next trigger follows system default
+        # without delaying hotkey-to-record latency.
+        self._sync_stream_with_system_default(stage="after-record")
+        self._release_stream_when_idle(stage="after-record")
 
         # 执行 restore（可恢复按键 + 非阻塞模式）
         # 阻塞模式下按键不会发送到系统，状态不会改变，不需要恢复
