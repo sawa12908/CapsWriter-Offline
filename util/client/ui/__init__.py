@@ -1,48 +1,73 @@
 # coding: utf-8
-"""
-客户端 UI 门面模块
+"""Lazy exports for client UI helpers."""
 
-该模块作为客户端访问 UI 功能的统一入口。
-在导入此模块时，会自动将客户端的 logger 注入到通用 UI 模块中。
-并重新导出常用的 UI 组件。
-"""
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 from .. import logger
-import util.ui
 
-# 1. 注入 Client Logger 到通用 UI 模块
-util.ui.set_ui_logger(logger)
 
-# 2. 导出客户端特有的 UI 组件
-from util.client.ui.tips import TipsDisplay
+_LOCAL_EXPORTS = {
+    "TipsDisplay": ("util.client.ui.tips", "TipsDisplay"),
+    "RecordingIndicator": ("util.client.ui.recording_indicator", "RecordingIndicator"),
+}
 
-# 3. 重新导出通用 UI 组件 (Re-export)
-# 这样客户端其他模块只需 from util.client.ui import ... 即可
-from util.ui import (
-    toast,
-    toast_stream,
-    ToastMessage,
-    ToastMessageManager,
-    ToastMessageManager,
-    enable_min_to_tray,
-    stop_tray,
-)
+_SHARED_EXPORTS = {
+    "toast",
+    "toast_stream",
+    "ToastMessage",
+    "ToastMessageManager",
+    "enable_min_to_tray",
+    "stop_tray",
+}
 
-# 4. 导出菜单处理器（供 Startup 使用）
-from util.ui.rectify_menu_handler import on_add_rectify_record
-from util.ui.hotword_menu_handler import on_add_hotword
-from util.ui.context_menu_handler import on_edit_context
+_MENU_EXPORTS = {
+    "on_add_rectify_record": ("util.ui.rectify_menu_handler", "on_add_rectify_record"),
+    "on_add_hotword": ("util.ui.hotword_menu_handler", "on_add_hotword"),
+    "on_edit_context": ("util.ui.context_menu_handler", "on_edit_context"),
+}
+
+
+def _get_shared_ui():
+    module = import_module("util.ui")
+    module.set_ui_logger(logger)
+    return module
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LOCAL_EXPORTS:
+        module_name, attr_name = _LOCAL_EXPORTS[name]
+        value = getattr(import_module(module_name), attr_name)
+        globals()[name] = value
+        return value
+
+    if name in _SHARED_EXPORTS:
+        value = getattr(_get_shared_ui(), name)
+        globals()[name] = value
+        return value
+
+    if name in _MENU_EXPORTS:
+        module_name, attr_name = _MENU_EXPORTS[name]
+        value = getattr(import_module(module_name), attr_name)
+        globals()[name] = value
+        return value
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
-    'logger',
-    'TipsDisplay',
-    'toast',
-    'toast_stream',
-    'ToastMessage',
-    'ToastMessageManager',
-    'enable_min_to_tray',
-    'stop_tray',
-    'on_add_rectify_record',
-    'on_add_hotword',
-    'on_edit_context',
+    "logger",
+    "TipsDisplay",
+    "RecordingIndicator",
+    "toast",
+    "toast_stream",
+    "ToastMessage",
+    "ToastMessageManager",
+    "enable_min_to_tray",
+    "stop_tray",
+    "on_add_rectify_record",
+    "on_add_hotword",
+    "on_edit_context",
 ]

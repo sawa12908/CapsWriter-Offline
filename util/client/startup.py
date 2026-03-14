@@ -1,134 +1,189 @@
+# coding: utf-8
 
 import os
 from pathlib import Path
 from platform import system
-from util.client.state import get_state
-from . import logger
+
 from config_client import ClientConfig as Config
-from util.client.cleanup import request_exit_from_tray
-from util.client.ui import TipsDisplay
-from util.hotword import get_hotword_manager
-from util.llm.llm_handler import init_llm_system
 from util.client.audio import AudioStreamManager
+from util.client.cleanup import request_exit_from_tray
 from util.client.shortcut.shortcut_config import Shortcut
 from util.client.shortcut.shortcut_manager import ShortcutManager
+from util.client.state import get_state
+from util.client.ui import RecordingIndicator, TipsDisplay
+from util.hotword import get_hotword_manager
+from util.llm.llm_handler import init_llm_system
 from util.tools.empty_working_set import empty_current_working_set
+from util.tools.windows_privilege import is_process_elevated
 
+from . import logger
 
 
 def _setup_tray(state, base_dir):
-    """
-    初始化托盘图标（延迟导入，支持无 GUI 环境）
-    """
+    """Initialize tray actions for the client."""
     try:
         from util.client.ui import enable_min_to_tray
     except ImportError as e:
-        logger.warning(f"托盘模块导入失败，跳过托盘功能: {e}")
+        logger.warning(f"tray module import failed, skip tray features: {e}")
         return
 
+    def _toast(message: str, duration: int = 2200, bg: str = "#075077") -> None:
+        try:
+            from util.client.ui import toast
+
+            toast(message, duration=duration, bg=bg)
+        except Exception:
+            logger.info(message)
+
     def restart_audio():
-        if state.stream_manager:
-            state.stream_manager.reopen()
-            logger.info("用户请求重启音频")
+        manager = state.stream_manager
+        if not manager:
+            _toast("Audio stream is not ready yet.", bg="#8a3a2f")
+            return
+        manager.reopen(reason="tray:restart-audio")
+        logger.info("user requested audio restart from tray")
 
     def clear_memory():
         from util.llm.llm_handler import clear_llm_history
+
         clear_llm_history()
-        from util.client.ui import toast
-        toast("清除成功：已清除所有角色的对话历史记录", duration=3000, bg="#075077")
+        _toast("Memory cleared: all role chat history removed.", duration=3000)
 
     def add_hotword():
         try:
             from util.client.ui import on_add_hotword
+
             on_add_hotword()
         except ImportError as e:
-            logger.warning(f"无法导入热词菜单处理器: {e}")
+            logger.warning(f"failed to import hotword menu handler: {e}")
 
     def add_rectify():
         try:
             from util.client.ui import on_add_rectify_record
+
             on_add_rectify_record()
         except ImportError as e:
-            logger.warning(f"无法导入纠错菜单处理器: {e}")
+            logger.warning(f"failed to import rectify menu handler: {e}")
 
     def add_context():
         try:
             from util.client.ui import on_edit_context
+
             on_edit_context()
         except ImportError as e:
-            logger.warning(f"无法导入上下文菜单处理器: {e}")
+            logger.warning(f"failed to import context menu handler: {e}")
 
     def copy_last_result():
         text = state.last_output_text
         if text:
             from util.llm.llm_clipboard import copy_to_clipboard
+
             copy_to_clipboard(text)
 
-    import os
-    icon_path = os.path.join(base_dir, 'assets', 'icon.ico')
+    icon_path = os.path.join(base_dir, "assets", "icon.ico")
     enable_min_to_tray(
-        'CapsWriter Client',
+        "CapsWriter Client",
         icon_path,
         exit_callback=request_exit_from_tray,
         more_options=[
-            ('📋 复制结果', copy_last_result),
-            ('📝 上下文', add_context),
-            ('✨ 添加热词', add_hotword),
-            ('🛠️ 添加纠错', add_rectify),
-            ('🧹 清除记忆', clear_memory),
-            ('🔄 重启音频', restart_audio),
-        ]
+            ("Copy Last Result", copy_last_result),
+            ("Edit Context", add_context),
+            ("Add Hotword", add_hotword),
+            ("Add Rectify", add_rectify),
+            ("Clear Memory", clear_memory),
+            ("Restart Audio", restart_audio),
+        ],
     )
-    logger.info("托盘图标已启用")
+    logger.info("tray icon enabled")
+
+
+def _notify_windows_privilege_status() -> None:
+    """Warn when the client is not elevated on Windows."""
+    if system() != "Windows":
+        return
+
+    if is_process_elevated():
+        logger.info("client privilege: elevated (administrator)")
+        return
+
+    warning = (
+        "当前客户端未以管理员身份运行；如果前台程序本身是管理员权限、任务管理器、"
+        "某些游戏或独占输入程序，后台全局快捷键可能无法触发。"
+    )
+    guidance = "如遇到这类场景，请以管理员身份重新启动客户端。"
+    logger.warning(f"{warning}{guidance}")
+
+    try:
+        from util.client.state import console
+
+        console.print(f"[bold yellow]权限提醒[/]：{warning}")
+        console.print(f"[yellow]{guidance}[/]")
+    except Exception as e:
+        logger.debug(f"print privilege warning skipped: {e}")
+
+    try:
+        from util.client.ui import toast
+
+        toast(
+            "当前客户端不是管理员。若在管理员程序或游戏里后台热键失效，请以管理员身份运行客户端。",
+            duration=5500,
+            bg="#8a3a2f",
+        )
+    except Exception as e:
+        logger.debug(f"toast privilege warning skipped: {e}")
+
 
 def setup_client_components(base_dir):
-    """
-    初始化客户端各个组件
-    
-    Args:
-        base_dir: 项目根目录
-        
-    Returns:
-        ClientState: 初始完成的全局状态对象
-    """
     state = get_state()
     state.initialize()
 
-    # 1. 托盘
+    # 1) Tray
     if Config.enable_tray:
         _setup_tray(state, base_dir)
 
-    # 2. UI 提示
+    # 2) Startup tips
     TipsDisplay.show_mic_tips()
+    _notify_windows_privilege_status()
 
-    # 3. 热词
-    logger.info("正在加载热词...")
+    # 2.1) Recording indicator
+    try:
+        state.recording_indicator = RecordingIndicator()
+        logger.info("recording indicator enabled")
+    except Exception as e:
+        logger.warning(f"failed to initialize recording indicator: {e}")
+
+    # 3) Hotword
+    logger.info("loading hotword data...")
     hotword_files = {
-        'hot': Path('hot.txt'),
-        'rule': Path('hot-rule.txt'),
-        'rectify': Path('hot-rectify.txt'),
-        'shortcut': Path('hot-shortcut.txt'),
+        "hot": Path("hot.txt"),
+        "rule": Path("hot-rule.txt"),
+        "rectify": Path("hot-rectify.txt"),
+        "shortcut": Path("hot-shortcut.txt"),
     }
     hotword_manager = get_hotword_manager(
         hotword_files=hotword_files,
         threshold=Config.hot_thresh,
         similar_threshold=Config.hot_similar,
-        rectify_threshold=Config.hot_rectify
+        rectify_threshold=Config.hot_rectify,
     )
     hotword_manager.load_all()
     hotword_manager.start_file_watcher()
 
-    # 4. LLM
-    logger.info("正在初始化 LLM 系统...")
+    # 4) LLM
+    logger.info("initializing LLM system...")
     init_llm_system()
-    logger.info("LLM 系统初始化完成")
+    logger.info("LLM system initialized")
 
-    # 5. 音频流
-    logger.info("正在打开音频流...")
+    # 5) Audio stream
+    logger.info("opening audio stream...")
     stream_manager = AudioStreamManager(state)
     state.stream_manager = stream_manager
-    if getattr(Config, 'keep_mic_stream_open', True):
-        preferred_name = getattr(Config, 'mic_preferred_input_name', None)
+    if getattr(Config, "keep_mic_stream_open", True):
+        preferred_name = getattr(Config, "mic_preferred_input_name", None)
+        force_preferred = bool(getattr(Config, "mic_force_preferred_input", False))
+        if force_preferred and not str(preferred_name or "").strip():
+            logger.error("force preferred input enabled but mic_preferred_input_name is empty")
+            return state
         if preferred_name:
             stream = stream_manager.open(
                 preferred_input_name=preferred_name,
@@ -136,36 +191,40 @@ def setup_client_components(base_dir):
                 allow_first_available_fallback=False,
             )
             if stream is None:
-                logger.warning(f"preferred input unavailable at startup: {preferred_name}, fallback to default")
-                stream_manager.open()
+                if force_preferred:
+                    logger.error(
+                        f"preferred input unavailable at startup with force enabled: {preferred_name}"
+                    )
+                else:
+                    logger.warning(
+                        f"preferred input unavailable at startup: {preferred_name}, fallback to default"
+                    )
+                    stream_manager.open()
         else:
             stream_manager.open()
     else:
         logger.info("microphone stream lazy mode enabled; idle will not occupy mic")
 
-    # 6. 快捷键管理器（统一管理键盘和鼠标快捷键）
-    # 从 Config.shortcuts 列表创建 Shortcut 对象
+    # 6) Shortcut manager
     shortcuts = [Shortcut(**sc) for sc in Config.shortcuts]
-    logger.info(f"正在初始化快捷键管理器，共 {len(shortcuts)} 个快捷键")
-
+    logger.info(f"initializing shortcut manager, total={len(shortcuts)}")
     shortcut_manager = ShortcutManager(state, shortcuts)
     state.shortcut_manager = shortcut_manager
     shortcut_manager.start()
-
-    # 为了兼容性，同时保留旧的 shortcut_handler 引用
     state.shortcut_handler = shortcut_manager
 
-    # 7. UDP 控制（可选）
+    # 7) UDP control (optional)
     if Config.udp_control:
         from util.client.udp.udp_control import UDPController
-        logger.info(f"正在启用 UDP 控制，端口: {Config.udp_control_port}")
+
+        logger.info(f"starting UDP control on port {Config.udp_control_port}")
         udp_controller = UDPController(shortcut_manager)
         state.udp_controller = udp_controller
         udp_controller.start()
 
-    # 9. 内存清理
-    if system() == 'Windows':
+    # 8) Working-set cleanup on Windows
+    if system() == "Windows":
         empty_current_working_set()
 
-    logger.info("客户端初始化完成，等待语音输入...")
+    logger.info("client initialization complete, waiting for speech input...")
     return state

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import numpy as np
 import sounddevice as sd
 
+from config_client import ClientConfig as Config
 from . import logger
 from util.client.state import console
 from util.common.lifecycle import lifecycle
@@ -40,6 +41,11 @@ class AudioStreamManager:
         self.state = state
         self._channels = 1
         self._running = False
+        try:
+            block_duration = float(getattr(Config, "mic_block_duration", self.BLOCK_DURATION))
+            self.BLOCK_DURATION = max(0.005, min(0.10, block_duration))
+        except Exception:
+            pass
 
         self._reopen_lock = threading.Lock()
         self._stream_lock = threading.RLock()
@@ -73,6 +79,8 @@ class AudioStreamManager:
         if not self.state.recording:
             return
 
+        self.state.mark_recording_audio_started(time.time())
+
         if self.state.loop and self.state.queue_in:
             asyncio.run_coroutine_threadsafe(
                 self.state.queue_in.put(
@@ -100,6 +108,24 @@ class AudioStreamManager:
     @staticmethod
     def _normalize_device_name(name: str) -> str:
         return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+    @staticmethod
+    def _looks_like_bluetooth_handsfree_input(name: str) -> bool:
+        normalized = "".join(ch.lower() for ch in str(name) if ch.isalnum())
+        if not normalized:
+            return False
+        markers = (
+            "bluetooth",
+            "handsfree",
+            "headset",
+            "agaudio",
+            "agau",
+            "airpods",
+            "wf1000",
+            "wh1000",
+            "freebuds",
+        )
+        return any(token in normalized for token in markers)
 
     @staticmethod
     def _signature_to_text(signature: Optional[DeviceSignature]) -> str:
@@ -161,7 +187,20 @@ class AudioStreamManager:
             seen.add(sig)
             candidates.append(candidate)
 
-        # 1) PortAudio global default input (what device=None uses).
+        # 1) Windows WASAPI default input index.
+        # Prefer this first on Windows to align with modern system Sound settings.
+        if system() == "Windows":
+            wasapi_api_index = self._get_hostapi_index("Windows WASAPI")
+            if wasapi_api_index is not None:
+                try:
+                    hostapi = sd.query_hostapis(wasapi_api_index)
+                    default_index = int(hostapi.get("default_input_device", -1))
+                    if default_index >= 0:
+                        _add(self._build_input_info_from_index(default_index, "wasapi-default"))
+                except Exception as e:
+                    logger.debug(f"resolve WASAPI default input failed: {e}")
+
+        # 2) PortAudio global default input (what device=None uses).
         try:
             info = sd.query_devices(kind="input")
             if isinstance(info, dict) and int(info.get("max_input_channels", 0)) > 0:
@@ -181,22 +220,10 @@ class AudioStreamManager:
         except Exception as e:
             logger.debug(f"resolve kind='input' failed: {e}")
 
-        # 2) PortAudio default input index tuple.
+        # 3) PortAudio default input index tuple.
         default_index = self._get_default_input_index()
         if default_index is not None:
             _add(self._build_input_info_from_index(default_index, "default-index"))
-
-        # 3) Windows WASAPI default input index.
-        if system() == "Windows":
-            wasapi_api_index = self._get_hostapi_index("Windows WASAPI")
-            if wasapi_api_index is not None:
-                try:
-                    hostapi = sd.query_hostapis(wasapi_api_index)
-                    default_index = int(hostapi.get("default_input_device", -1))
-                    if default_index >= 0:
-                        _add(self._build_input_info_from_index(default_index, "wasapi-default"))
-                except Exception as e:
-                    logger.debug(f"resolve WASAPI default input failed: {e}")
 
         return candidates
 
@@ -204,9 +231,9 @@ class AudioStreamManager:
         """
         Resolve current system default input device.
         Priority:
-        1) PortAudio kind='input'
-        2) PortAudio default input index
-        3) Windows WASAPI default input
+        1) Windows WASAPI default input (Windows only)
+        2) PortAudio kind='input'
+        3) PortAudio default input index
         4) First available input (optional fallback)
         """
         candidates = self._collect_default_input_candidates()
@@ -216,6 +243,16 @@ class AudioStreamManager:
                     f"{c.get('source')}:{c.get('index')}:{c.get('name')}" for c in candidates
                 )
                 logger.debug(f"default input candidates: {summary}")
+                head = candidates[0]
+                if any(
+                    int(c.get("index", -1)) != int(head.get("index", -1))
+                    or str(c.get("name", "")) != str(head.get("name", ""))
+                    for c in candidates[1:]
+                ):
+                    logger.info(
+                        "default input candidates differ, choose first: "
+                        f"{head.get('source')}:{head.get('index')}:{head.get('name')}"
+                    )
             return candidates[0]
 
         if not allow_first_available:
@@ -277,6 +314,23 @@ class AudioStreamManager:
         if best_idx is not None and best_score >= 6:
             return best_idx
         return None
+
+    def _collect_non_bluetooth_input_candidates(self) -> List[Tuple[Optional[int], dict, str, bool]]:
+        """Candidates for faster on-demand recording (avoid BT hands-free when possible)."""
+        items: List[Tuple[Optional[int], dict, str, bool]] = []
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return items
+
+        for idx, dev in enumerate(devices):
+            if int(dev.get("max_input_channels", 0)) <= 0:
+                continue
+            name = str(dev.get("name", ""))
+            if self._looks_like_bluetooth_handsfree_input(name):
+                continue
+            items.append((int(idx), dict(dev), "fast-non-bt", False))
+        return items
 
     def _get_default_input_signature(self) -> Optional[DeviceSignature]:
         try:
@@ -640,6 +694,7 @@ class AudioStreamManager:
         preferred_input_name: Optional[str] = None,
         fallback_to_default: bool = True,
         allow_first_available_fallback: bool = True,
+        prefer_non_bluetooth: bool = False,
     ) -> Optional[sd.InputStream]:
         with self._stream_lock:
             candidates: List[Tuple[Optional[int], dict, str, bool]] = []
@@ -664,12 +719,21 @@ class AudioStreamManager:
                     except Exception:
                         logger.debug(f"preferred name unavailable: {preferred_input_name}")
 
-            # Current system default.
+            # Fast path for push-to-talk when no preferred input is configured.
+            if not candidates and prefer_non_bluetooth:
+                candidates.extend(self._collect_non_bluetooth_input_candidates())
+
+            # Current system default (may include multiple hostapi candidates).
             if not candidates or fallback_to_default:
-                info = self._resolve_default_input_info(
-                    allow_first_available=allow_first_available_fallback
-                )
-                if info is not None:
+                default_infos = self._collect_default_input_candidates()
+                if not default_infos:
+                    info = self._resolve_default_input_info(
+                        allow_first_available=allow_first_available_fallback
+                    )
+                    if info is not None:
+                        default_infos = [info]
+
+                for info in default_infos:
                     idx = int(info.get("index", -1))
                     source = str(info.get("source", "system-default"))
                     try:
@@ -682,10 +746,14 @@ class AudioStreamManager:
                         if isinstance(dev, dict):
                             dev = dict(dev)
                             dev["source"] = source
-                        candidates.append((idx if idx >= 0 else None, dev, f"system-default:{source}", False))
+                        candidates.append(
+                            (idx if idx >= 0 else None, dev, f"system-default:{source}", False)
+                        )
                     except Exception:
                         # Keep original resolved info if query by kind failed.
-                        candidates.append((idx if idx >= 0 else None, info, f"system-default:{source}", False))
+                        candidates.append(
+                            (idx if idx >= 0 else None, info, f"system-default:{source}", False)
+                        )
 
             # De-duplicate by signature.
             deduped: List[Tuple[Optional[int], dict, str, bool]] = []
@@ -739,7 +807,11 @@ class AudioStreamManager:
                 self._current_input_index = actual_index if actual_index >= 0 else device_index
                 self._current_input_name = actual_name
                 self._default_input_signature = self._get_default_input_signature()
-                self._start_default_input_listener()
+                if bool(getattr(Config, "keep_mic_stream_open", True)):
+                    self._start_default_input_listener()
+                else:
+                    # On-demand mode: skip per-record listener startup/shutdown overhead.
+                    self._listener_mode = None
 
                 console.print(
                     f"using input device: {actual_name}, channels: {used_channels}",
@@ -748,7 +820,7 @@ class AudioStreamManager:
                 logger.info(
                     "input device opened: "
                     f"name={actual_name}, device={self._current_input_index}, "
-                    f"channels={used_channels}, rate={used_rate}, mode={label}"
+                    f"channels={used_channels}, rate={used_rate}, block={self.BLOCK_DURATION:.3f}s, mode={label}"
                 )
                 return stream
 
@@ -815,6 +887,8 @@ class AudioStreamManager:
         try:
             logger.info(f"reopening audio stream, reason: {reason}")
             strict_default_follow = reason.startswith("shortcut:") or reason.startswith("WM_")
+            preferred_name_cfg = getattr(Config, "mic_preferred_input_name", None)
+            force_preferred_cfg = bool(getattr(Config, "mic_force_preferred_input", False))
 
             previous_index = self._current_input_index
             previous_name = self._current_input_name
@@ -827,7 +901,7 @@ class AudioStreamManager:
                 self._refresh_portaudio(reason=f"pre-reopen:{reason}")
                 time.sleep(0.05)
 
-            if reason == "stream finished unexpectedly":
+            if reason == "stream finished unexpectedly" and not force_preferred_cfg:
                 stream = self.open(
                     preferred_input_index=previous_index,
                     preferred_input_name=previous_name,
@@ -837,12 +911,8 @@ class AudioStreamManager:
                 if stream is not None:
                     return stream
 
-            preferred_name = None
-            try:
-                from config_client import ClientConfig as Config
-                preferred_name = getattr(Config, "mic_preferred_input_name", None)
-            except Exception:
-                preferred_name = None
+            preferred_name = preferred_name_cfg
+            force_preferred = force_preferred_cfg
 
             if preferred_name:
                 stream = self.open(
@@ -852,6 +922,11 @@ class AudioStreamManager:
                 )
                 if stream is not None:
                     return stream
+                if force_preferred:
+                    logger.error(
+                        f"preferred input unavailable during reopen with force enabled: {preferred_name}"
+                    )
+                    return None
                 logger.warning(f"preferred input unavailable during reopen: {preferred_name}, fallback to default")
 
             stream = self.open(allow_first_available_fallback=not strict_default_follow)
