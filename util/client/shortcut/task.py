@@ -7,7 +7,7 @@
 
 import asyncio
 import time
-from threading import Event
+from threading import Event, Timer
 from typing import TYPE_CHECKING, Optional
 
 from config_client import ClientConfig as Config
@@ -50,6 +50,7 @@ class ShortcutTask:
         self.pressed: bool = False
         self.released: bool = True
         self.event: Event = Event()
+        self._release_timer: Optional[Timer] = None
 
         # 线程池（用于 countdown）
         self.pool = None
@@ -67,6 +68,8 @@ class ShortcutTask:
     def _sync_stream_with_system_default(self, stage: str = "after-record") -> None:
         """Ensure stream follows current system default input at a non-critical stage."""
         if not getattr(Config, "keep_mic_stream_open", True):
+            return
+        if bool(getattr(Config, "mic_force_preferred_input", False)):
             return
 
         stream_manager = getattr(self.state, "stream_manager", None)
@@ -97,6 +100,15 @@ class ShortcutTask:
         try:
             logger.info(f"[{self.shortcut.key}] opening microphone stream on demand")
             preferred_name = getattr(Config, "mic_preferred_input_name", None)
+            force_preferred = bool(getattr(Config, "mic_force_preferred_input", False))
+            prefer_non_bluetooth = bool(
+                getattr(Config, "mic_auto_prefer_non_bluetooth_input", False)
+            )
+            if force_preferred and not str(preferred_name or "").strip():
+                logger.error(
+                    f"[{self.shortcut.key}] force preferred input enabled but mic_preferred_input_name is empty"
+                )
+                return
             if preferred_name:
                 stream = stream_manager.open(
                     preferred_input_name=preferred_name,
@@ -104,12 +116,23 @@ class ShortcutTask:
                     allow_first_available_fallback=False,
                 )
                 if stream is None:
+                    if force_preferred:
+                        logger.error(
+                            f"[{self.shortcut.key}] preferred input unavailable and force enabled: {preferred_name}"
+                        )
+                        return
                     logger.warning(
                         f"[{self.shortcut.key}] preferred input unavailable: {preferred_name}, fallback to default"
                     )
-                    stream_manager.open()
+                    stream_manager.open(
+                        prefer_non_bluetooth=prefer_non_bluetooth,
+                        allow_first_available_fallback=False,
+                    )
             else:
-                stream_manager.open()
+                stream_manager.open(
+                    prefer_non_bluetooth=prefer_non_bluetooth,
+                    allow_first_available_fallback=False,
+                )
         except Exception as e:
             logger.warning(f"[{self.shortcut.key}] failed to open microphone stream: {e}")
 
@@ -120,52 +143,77 @@ class ShortcutTask:
         if getattr(Config, "keep_mic_stream_open", True):
             return
 
-        if self.state.recording:
+        self._cancel_pending_release()
+
+        def _do_release() -> None:
+            if getattr(Config, "keep_mic_stream_open", True):
+                return
+            if self.state.recording:
+                return
+
+            stream_manager = getattr(self.state, "stream_manager", None)
+            if stream_manager is None:
+                return
+            if getattr(self.state, "stream", None) is None:
+                return
+
+            try:
+                stream_manager.close()
+                logger.info(f"[{self.shortcut.key}] microphone stream released ({stage})")
+            except Exception as e:
+                logger.warning(f"[{self.shortcut.key}] failed to release microphone stream: {e}")
+
+        delay = float(getattr(Config, "mic_idle_release_delay", 0.0) or 0.0)
+        if delay <= 0:
+            _do_release()
             return
 
-        stream_manager = getattr(self.state, "stream_manager", None)
-        if stream_manager is None:
-            return
+        timer = Timer(delay, _do_release)
+        timer.daemon = True
+        self._release_timer = timer
+        timer.start()
+        logger.debug(
+            f"[{self.shortcut.key}] schedule microphone release in {delay:.2f}s ({stage})"
+        )
 
-        if getattr(self.state, "stream", None) is None:
-            return
+    def _cancel_pending_release(self) -> None:
+        timer = self._release_timer
+        if timer and timer.is_alive():
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._release_timer = None
 
-        try:
-            stream_manager.close()
-            logger.info(f"[{self.shortcut.key}] microphone stream released ({stage})")
-        except Exception as e:
-            logger.warning(f"[{self.shortcut.key}] failed to release microphone stream: {e}")
+    def _play_record_start_sound(self) -> None:
+        """开始录音提示音已移除。"""
+        return
 
     def launch(self) -> None:
         """启动录音任务"""
         logger.info(f"[{self.shortcut.key}] 触发：开始录音")
 
-        # Start recording immediately on hotkey trigger to avoid clipping the first seconds.
-        self._sync_stream_with_system_default(stage="before-record")
-        self._ensure_stream_ready()
-
-        # 记录开始时间
+        # Mark recording first so open-stream latency won't reduce effective hold duration.
+        self._cancel_pending_release()
         self.recording_start_time = time.time()
         self.is_recording = True
-
-        # 将开始标志放入队列
         asyncio.run_coroutine_threadsafe(
             self.state.queue_in.put({'type': 'begin', 'time': self.recording_start_time, 'data': None}),
             self.state.loop
         )
 
-        # 更新录音状态
         self.state.start_recording(self.recording_start_time)
-
-        # 打印动画：正在录音
         self._status.start()
 
-        # 启动识别任务
         recorder = self._get_recorder()
         self.task = asyncio.run_coroutine_threadsafe(
             recorder.record_and_send(),
             self.state.loop,
         )
+
+        # Ensure input stream after task is armed.
+        self._sync_stream_with_system_default(stage="before-record")
+        self._ensure_stream_ready()
 
     def cancel(self) -> None:
         """取消录音任务（时间过短）"""
@@ -175,8 +223,9 @@ class ShortcutTask:
         self.state.stop_recording()
         self._status.stop()
 
-        self.task.cancel()
-        self.task = None
+        if self.task is not None:
+            self.task.cancel()
+            self.task = None
 
         # Keep stream/device sync behavior consistent even on short-cancel paths.
         self._sync_stream_with_system_default(stage="after-cancel")
