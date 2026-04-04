@@ -45,6 +45,8 @@ class ShortcutTask:
         self.task: Optional[asyncio.Future] = None
         self.recording_start_time: float = 0.0
         self.is_recording: bool = False
+        self.is_pending_hold: bool = False
+        self.pending_hold_started_at: float = 0.0
 
         # hold_mode 状态跟踪
         self.pressed: bool = False
@@ -189,9 +191,24 @@ class ShortcutTask:
         """开始录音提示音已移除。"""
         return
 
+    def mark_pending_hold(self) -> None:
+        """标记长按等待态，短按阶段不启动录音链路。"""
+        self.pressed = True
+        self.released = False
+        self.is_pending_hold = True
+        self.pending_hold_started_at = time.time()
+        logger.debug(f"[{self.shortcut.key}] 进入长按等待态")
+
+    def clear_pending_hold(self) -> None:
+        """清理长按等待态。"""
+        self.is_pending_hold = False
+        self.pending_hold_started_at = 0.0
+
     def launch(self) -> None:
         """启动录音任务"""
         logger.info(f"[{self.shortcut.key}] 触发：开始录音")
+
+        self.clear_pending_hold()
 
         # Mark recording first so open-stream latency won't reduce effective hold duration.
         self._cancel_pending_release()
@@ -219,6 +236,7 @@ class ShortcutTask:
         """取消录音任务（时间过短）"""
         logger.debug(f"[{self.shortcut.key}] 取消录音任务（时间过短）")
 
+        self.clear_pending_hold()
         self.is_recording = False
         self.state.stop_recording()
         self._status.stop()
@@ -235,6 +253,7 @@ class ShortcutTask:
         """完成录音任务"""
         logger.info(f"[{self.shortcut.key}] 释放：完成录音")
 
+        self.clear_pending_hold()
         self.is_recording = False
         self.state.stop_recording()
         self._status.stop()
