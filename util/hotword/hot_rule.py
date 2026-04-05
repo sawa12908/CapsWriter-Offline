@@ -44,11 +44,12 @@ class RuleCorrector:
         """
         new_patterns = {}
 
-        for line in rule_text.splitlines():
+        for raw_line in rule_text.splitlines():
+            line = raw_line.strip()
             if not line or line.startswith('#'):
                 continue
 
-            parts = line.split(' = ')
+            parts = re.split(r'\s*=\s*', line, maxsplit=1)
             if len(parts) == 2:
                 pattern = parts[0].strip()
                 replacement = parts[1].strip()
@@ -77,14 +78,16 @@ class RuleCorrector:
         with self._lock:
             patterns = self.patterns.copy()
 
+        original_text = text
         for pattern, replacement in patterns.items():
             try:
-                result = re.sub(pattern, replacement, result)
+                if re.search(pattern, original_text):
+                    text = re.sub(pattern, replacement, text)
             except Exception:
                 # 忽略无效的正则表达式
                 pass
 
-        return result
+        return text
 
 
 if __name__ == '__main__':

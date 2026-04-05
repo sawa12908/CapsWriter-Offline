@@ -28,6 +28,11 @@ AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
 SW_SHOWNOACTIVATE = 4
 WS_EX_NOACTIVATE = 0x08000000
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE = 0x0001
+SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
 
 
 class POINT(ctypes.Structure):
@@ -241,6 +246,7 @@ class IndicatorApp:
 
         self._visible = True
         self._update_position()
+        self._raise_to_topmost()
         win32gui.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
 
     def _hide(self) -> None:
@@ -291,6 +297,32 @@ class IndicatorApp:
             (AC_SRC_OVER, 0, 255, AC_SRC_ALPHA),
             ULW_ALPHA,
         )
+        self._raise_to_topmost(x=x, y=y)
+
+    def _raise_to_topmost(self, x: int = 0, y: int = 0) -> None:
+        if self._hwnd is None:
+            return
+
+        flags = SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+        self._user32.SetWindowPos(
+            self._hwnd,
+            HWND_NOTOPMOST,
+            x,
+            y,
+            0,
+            0,
+            flags,
+        )
+        self._user32.SetWindowPos(
+            self._hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            flags,
+        )
+        win32gui.BringWindowToTop(self._hwnd)
 
     def _cleanup(self) -> None:
         if self._hwnd is not None:
