@@ -23,46 +23,58 @@ from . import logger
 class TextOutput:
     """
     文本输出器
-    
+
     提供文本输出功能，支持模拟打字和粘贴两种方式。
     """
-    
+
     @staticmethod
     def strip_punc(text: str) -> str:
         """
         消除末尾标点
-        
+
         Args:
             text: 原始文本
-            
+
         Returns:
             去除末尾标点后的文本
         """
         if not text:
             return text
-        clean_text = text.rstrip(Config.trash_punc)
+        clean_text = text.rstrip(Config.trash_punc + ' ')
         return clean_text if clean_text else text
-    
+
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """
+        规范化输出文本
+
+        将问号全局替换为空格，并清理末尾标点与空格。
+        """
+        if not text:
+            return text
+        text = text.replace('？', ' ').replace('?', ' ')
+        return TextOutput.strip_punc(text)
+
     async def output(self, text: str, paste: Optional[bool] = None) -> None:
         """
         输出识别结果
-        
+
         根据配置选择使用模拟打字或粘贴方式输出文本。
-        
+
         Args:
             text: 要输出的文本
             paste: 是否使用粘贴方式（None 表示使用配置值）
         """
         if not text:
             return
-        
-        # 消除末尾标点
-        text = self.strip_punc(text)
-        
+
+        # 规范化输出文本
+        text = self.normalize_text(text)
+
         # 确定输出方式
         if paste is None:
             paste = Config.paste
-        
+
         if paste:
             await self._paste_text(text)
         else:

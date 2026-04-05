@@ -398,13 +398,20 @@ class ResultProcessor:
         if potential_hotwords and Config.hot:
             replaced_set = {hw for origin, hw, score in matched_hotwords}
             potential_matches = [(origin, hw, score) for origin, hw, score in potential_hotwords if hw not in replaced_set]
-            
+
             if potential_matches:
                 # 格式化潜在匹配列表，显示分数
                 potential_str = ", ".join([f"{origin}->{hw}({score:.2f})" for origin, hw, score in potential_matches[:5]])
                 if len(potential_matches) > 5:
                     potential_str += f" ... (共{len(potential_matches)}个)"
                 console.print(f'    潜在热词：[yellow]{potential_str}')
+                phoneme_corrector = self._hotword_manager.get_phoneme_corrector()
+                logger.debug(
+                    "潜在热词未替换: thresh=%.2f, similar=%.2f, candidates=%s",
+                    phoneme_corrector.threshold,
+                    phoneme_corrector.similar_threshold,
+                    potential_matches[:5],
+                )
 
         # 窗口兼容性检测
         paste = Config.paste
