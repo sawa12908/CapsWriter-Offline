@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
 import win32api
 import win32con
 import win32gui
@@ -97,7 +97,10 @@ class IndicatorApp:
     tick_seconds = 0.016
     offset_x = 7
     offset_y = 7
-    dot_color = "#ff2a2a"
+    dot_colors = {
+        "red": "#ff2a2a",
+        "yellow": "#ffd24a",
+    }
 
     def __init__(self) -> None:
         _enable_dpi_awareness()
@@ -107,6 +110,7 @@ class IndicatorApp:
         self._commands: "queue.Queue[str]" = queue.Queue()
         self._running = True
         self._visible = False
+        self._color = "red"
 
         self._class_name = f"CapsWriterRecordingIndicator_{win32api.GetCurrentProcessId()}"
         self._class_atom: Optional[int] = None
@@ -169,7 +173,7 @@ class IndicatorApp:
         )
         mask = mask.resize((self.dot_size, self.dot_size), Image.Resampling.LANCZOS)
 
-        image = Image.new("RGBA", (self.dot_size, self.dot_size), self.dot_color)
+        image = Image.new("RGBA", (self.dot_size, self.dot_size), ImageColor.getrgb(self.dot_colors[self._color]))
         image.putalpha(mask)
         return image
 
@@ -191,6 +195,20 @@ class IndicatorApp:
 
     def _install_bitmap(self) -> None:
         bgra = self._build_premultiplied_bgra()
+
+        if self._memory_dc and self._old_bitmap:
+            try:
+                self._gdi32.SelectObject(self._memory_dc, self._old_bitmap)
+            except Exception:
+                pass
+            self._old_bitmap = None
+
+        if self._bitmap_handle:
+            try:
+                self._gdi32.DeleteObject(self._bitmap_handle)
+            except Exception:
+                pass
+            self._bitmap_handle = None
 
         bmi = BITMAPINFO()
         bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
@@ -246,8 +264,10 @@ class IndicatorApp:
             self._handle_command(command)
 
     def _handle_command(self, command: str) -> None:
-        if command == "show":
-            self._show()
+        if command.startswith("show"):
+            _, _, color = command.partition(" ")
+            color = color.strip().lower() or "red"
+            self._show(color)
             return
         if command == "hide":
             self._hide()
@@ -255,8 +275,18 @@ class IndicatorApp:
         if command == "stop":
             self._running = False
 
-    def _show(self) -> None:
-        if self._visible or self._hwnd is None:
+    def _show(self, color: str = "red") -> None:
+        if self._hwnd is None:
+            return
+
+        color = color if color in self.dot_colors else "red"
+        color_changed = color != self._color
+        self._color = color
+        if color_changed:
+            self._install_bitmap()
+
+        if self._visible:
+            self._update_position()
             return
 
         self._visible = True

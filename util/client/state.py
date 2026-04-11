@@ -103,7 +103,7 @@ class ClientState:
 
         if self.recording_indicator is not None:
             try:
-                self.recording_indicator.show()
+                self.recording_indicator.show_recording()
             except Exception as e:
                 logger.debug(f"failed to show recording indicator on start: {e}")
 
@@ -120,7 +120,7 @@ class ClientState:
 
         if self.recording_indicator is not None:
             try:
-                self.recording_indicator.show()
+                self.recording_indicator.show_recording()
             except Exception as e:
                 logger.debug(f"failed to show recording indicator: {e}")
 

@@ -19,6 +19,7 @@ import sys
 import time
 import threading
 import platform
+import ctypes
 from typing import Optional
 from . import logger, set_ui_logger
 
@@ -239,6 +240,15 @@ class _TraySystem:
     def toggle_window(self) -> None:
         """切换窗口显示状态"""
         if not self.hwnd or user32 is None:
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    "当前进程以无控制台窗口模式运行，托盘图标无法恢复黑窗口。",
+                    self.title,
+                    0x00000040,
+                )
+            except Exception:
+                logger.info("当前进程无可恢复的控制台窗口")
             return
 
         if _is_window_visible(self.hwnd):
@@ -343,7 +353,7 @@ def enable_min_to_tray(name: Optional[str] = None, icon_path: Optional[str] = No
             return  # 已启动
 
         if not _get_console_hwnd():
-            return  # 没有控制台窗口
+            logger.info("未检测到控制台窗口，托盘图标将以无控制台模式运行")
 
         _tray_instance = _TraySystem(name, icon_path, more_options)
         _tray_instance.start()

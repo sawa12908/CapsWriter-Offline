@@ -289,191 +289,204 @@ class ResultProcessor:
                 f"时延: {delay:.2f}s"
             )
 
+        if self.state.recording_indicator is not None:
+            try:
+                self.state.recording_indicator.show_recognizing()
+            except Exception as e:
+                logger.debug(f"failed to switch recording indicator to recognizing: {e}")
+
         # 如果非最终结果，继续等待
         if not message['is_final']:
             return
 
-        sil_raw = str(text).strip().lower()
-        sil_clean = TextOutput.strip_punc(str(text)).strip().lower()
-        if sil_raw in {'/sil', 'sil', '[sil]', '<sil>'} or sil_clean in {'/sil', 'sil'}:
-            logger.info("忽略静音识别结果 /sil")
-            file_path = self.state.pop_audio_file(message.get('task_id'))
-            if file_path:
+        try:
+            sil_raw = str(text).strip().lower()
+            sil_clean = TextOutput.strip_punc(str(text)).strip().lower()
+            if sil_raw in {'/sil', 'sil', '[sil]', '<sil>'} or sil_clean in {'/sil', 'sil'}:
+                logger.info("忽略静音识别结果 /sil")
+                file_path = self.state.pop_audio_file(message.get('task_id'))
+                if file_path:
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.debug(f"删除静音音频文件失败: {e}")
+                return
+
+            # 繁体转换
+            if Config.traditional_convert:
                 try:
-                    file_path.unlink(missing_ok=True)
+                    from util.zhconv import convert as zhconv_convert
+                    text = zhconv_convert(text, Config.traditional_locale)
+                    logger.debug(f"繁体转换后: {text[:50]}{'...' if len(text) > 50 else ''}")
                 except Exception as e:
-                    logger.debug(f"删除静音音频文件失败: {e}")
-            return
+                    logger.warning(f"繁体转换失败: {e}")
 
-        # 繁体转换
-        if Config.traditional_convert:
-            try:
-                from util.zhconv import convert as zhconv_convert
-                text = zhconv_convert(text, Config.traditional_locale)
-                logger.debug(f"繁体转换后: {text[:50]}{'...' if len(text) > 50 else ''}")
-            except Exception as e:
-                logger.warning(f"繁体转换失败: {e}")
+            # 1. 音素检索，热词替换
+            correction_result = self._hotword_manager.get_phoneme_corrector().correct(text, k=10)
+            if Config.hot:
+                text = correction_result.text
 
-        # 1. 音素检索，热词替换
-        correction_result = self._hotword_manager.get_phoneme_corrector().correct(text, k=10)
-        if Config.hot:
-            text = correction_result.text
+            # 1.2 预处理文本（去除标点），方便后续匹配快捷键
+            clean_text = TextOutput.strip_punc(text)
 
-        # 1.2 预处理文本（去除标点），方便后续匹配快捷键
-        clean_text = TextOutput.strip_punc(text)
+            # 1.5 检查是否触发快捷键
+            shortcuts = self._hotword_manager.get_shortcuts()
+            if clean_text in shortcuts:
+                shortcut_val = shortcuts[clean_text]
+                logger.info(f"触发语音快捷键: {clean_text} -> {shortcut_val}")
 
-        # 1.5 检查是否触发快捷键
-        shortcuts = self._hotword_manager.get_shortcuts()
-        if clean_text in shortcuts:
-            shortcut_val = shortcuts[clean_text]
-            logger.info(f"触发语音快捷键: {clean_text} -> {shortcut_val}")
-            
-            # 支持多步序列: 文字 >> 快捷键1 >> 快捷键2 ...
-            steps = [s.strip() for s in shortcut_val.split(' >> ')]
-            
-            if len(steps) > 1:
-                # 1. 第一部分作为预置文字输出
-                prefix_text = steps[0]
-                if prefix_text:
-                    import keyboard as native_keyboard
-                    native_keyboard.write(prefix_text)
-                    logger.debug(f"输出预置文字: {prefix_text}")
-                
-                # 2. 后续部分作为快捷键顺序执行
-                for i in range(1, len(steps)):
-                    shortcut_keys = steps[i]
-                    if shortcut_keys:
-                        console.print(f'    [bold magenta]步骤 {i} 执行快捷键：{shortcut_keys}[/]')
-                        self._trigger_shortcut(shortcut_keys)
-                        # 如果有多个快捷键，中间稍作停顿以保证系统响应
-                        if i < len(steps) - 1:
-                            import time
-                            time.sleep(0.05)
-            else:
-                # 仅单个快捷键
-                shortcut_keys = steps[0]
-                console.print(f'    [bold magenta]执行快捷键：{clean_text} -> {shortcut_keys}[/]')
-                self._trigger_shortcut(shortcut_keys)
-            
-            console.line()
-            return  # 阻止后续文本输出和 LLM 处理
-            
-            # 播放提示音（可选）
-            # import winsound
-            # winsound.Beep(1000, 100)
-            
-            console.line()
-            return  # 阻止后续文本输出和 LLM 处理
+                # 支持多步序列: 文字 >> 快捷键1 >> 快捷键2 ...
+                steps = [s.strip() for s in shortcut_val.split(' >> ')]
 
-        # 2. 规则纠错
-        text = self._hotword_manager.get_rule_corrector().substitute(text)
-        text = TextOutput.strip_punc(text)
+                if len(steps) > 1:
+                    # 1. 第一部分作为预置文字输出
+                    prefix_text = steps[0]
+                    if prefix_text:
+                        import keyboard as native_keyboard
+                        native_keyboard.write(prefix_text)
+                        logger.debug(f"输出预置文字: {prefix_text}")
 
-        # 保存最近一次识别结果
-        self.state.last_recognition_text = text
+                    # 2. 后续部分作为快捷键顺序执行
+                    for i in range(1, len(steps)):
+                        shortcut_keys = steps[i]
+                        if shortcut_keys:
+                            console.print(f'    [bold magenta]步骤 {i} 执行快捷键：{shortcut_keys}[/]')
+                            self._trigger_shortcut(shortcut_keys)
+                            # 如果有多个快捷键，中间稍作停顿以保证系统响应
+                            if i < len(steps) - 1:
+                                import time
+                                time.sleep(0.05)
+                else:
+                    # 仅单个快捷键
+                    shortcut_keys = steps[0]
+                    console.print(f'    [bold magenta]执行快捷键：{clean_text} -> {shortcut_keys}[/]')
+                    self._trigger_shortcut(shortcut_keys)
 
-        # 控制台输出
-        console.print(f'    转录时延：{delay:.2f}s')
+                console.line()
+                return  # 阻止后续文本输出和 LLM 处理
 
-        # 先显示原始识别结果
-        original_text_stripped = TextOutput.strip_punc(original_text)
-        console.print(f'    识别结果：[green]{original_text_stripped}')
+                # 播放提示音（可选）
+                # import winsound
+                # winsound.Beep(1000, 100)
 
-        # 如果发生了热词替换，显示替换后的结果
-        if original_text_stripped != text:
-            console.print(f'    热词替换：[cyan]{text}')
-            logger.debug(f"热词替换后: {text[:50]}{'...' if len(text) > 50 else ''}")
+                console.line()
+                return  # 阻止后续文本输出和 LLM 处理
 
-        # 热词匹配情况
-        matched_hotwords = correction_result.matchs
-        potential_hotwords = correction_result.similars
+            # 2. 规则纠错
+            text = self._hotword_manager.get_rule_corrector().substitute(text)
+            text = TextOutput.strip_punc(text)
 
-        # 1. 显示完全匹配/已替换的热词
-        if matched_hotwords and Config.hot:
-            # 提取热词文本 (现为 (原词, 热词, 分数))
-            replaced_info = [f"{origin}->[green4]{hw}[/]" for origin, hw, score in matched_hotwords]
-            console.print(f'    完全匹配：{", ".join(replaced_info)}')
+            # 保存最近一次识别结果
+            self.state.last_recognition_text = text
 
-        # 2. 显示潜在热词（从上下文热词中排除已替换的）
-        if potential_hotwords and Config.hot:
-            replaced_set = {hw for origin, hw, score in matched_hotwords}
-            potential_matches = [(origin, hw, score) for origin, hw, score in potential_hotwords if hw not in replaced_set]
+            # 控制台输出
+            console.print(f'    转录时延：{delay:.2f}s')
 
-            if potential_matches:
-                # 格式化潜在匹配列表，显示分数
-                potential_str = ", ".join([f"{origin}->{hw}({score:.2f})" for origin, hw, score in potential_matches[:5]])
-                if len(potential_matches) > 5:
-                    potential_str += f" ... (共{len(potential_matches)}个)"
-                console.print(f'    潜在热词：[yellow]{potential_str}')
-                phoneme_corrector = self._hotword_manager.get_phoneme_corrector()
-                logger.debug(
-                    "潜在热词未替换: thresh=%.2f, similar=%.2f, candidates=%s",
-                    phoneme_corrector.threshold,
-                    phoneme_corrector.similar_threshold,
-                    potential_matches[:5],
+            # 先显示原始识别结果
+            original_text_stripped = TextOutput.strip_punc(original_text)
+            console.print(f'    识别结果：[green]{original_text_stripped}')
+
+            # 如果发生了热词替换，显示替换后的结果
+            if original_text_stripped != text:
+                console.print(f'    热词替换：[cyan]{text}')
+                logger.debug(f"热词替换后: {text[:50]}{'...' if len(text) > 50 else ''}")
+
+            # 热词匹配情况
+            matched_hotwords = correction_result.matchs
+            potential_hotwords = correction_result.similars
+
+            # 1. 显示完全匹配/已替换的热词
+            if matched_hotwords and Config.hot:
+                # 提取热词文本 (现为 (原词, 热词, 分数))
+                replaced_info = [f"{origin}->[green4]{hw}[/]" for origin, hw, score in matched_hotwords]
+                console.print(f'    完全匹配：{", ".join(replaced_info)}')
+
+            # 2. 显示潜在热词（从上下文热词中排除已替换的）
+            if potential_hotwords and Config.hot:
+                replaced_set = {hw for origin, hw, score in matched_hotwords}
+                potential_matches = [(origin, hw, score) for origin, hw, score in potential_hotwords if hw not in replaced_set]
+
+                if potential_matches:
+                    # 格式化潜在匹配列表，显示分数
+                    potential_str = ", ".join([f"{origin}->{hw}({score:.2f})" for origin, hw, score in potential_matches[:5]])
+                    if len(potential_matches) > 5:
+                        potential_str += f" ... (共{len(potential_matches)}个)"
+                    console.print(f'    潜在热词：[yellow]{potential_str}')
+                    phoneme_corrector = self._hotword_manager.get_phoneme_corrector()
+                    logger.debug(
+                        "潜在热词未替换: thresh=%.2f, similar=%.2f, candidates=%s",
+                        phoneme_corrector.threshold,
+                        phoneme_corrector.similar_threshold,
+                        potential_matches[:5],
+                    )
+
+            # 窗口兼容性检测
+            paste = Config.paste
+            window_info = get_active_window_info()
+
+            if window_info:
+                window_title = window_info.get('title', '')
+                compatibility_apps = ['weixin', '微信', 'wechat', 'WeChat']
+                if window_title in compatibility_apps:
+                    paste = True
+                    logger.debug(f"检测到兼容性应用: {window_title}，使用粘贴模式")
+
+            # LLM 处理和输出
+            llm_result = None
+            if Config.llm_enabled:
+                from util.llm.llm_process_text import llm_process_text
+                llm_result = await llm_process_text(
+                    text,
+                    return_result=True,
+                    paste=paste,
+                    matched_hotwords=potential_hotwords  # 传递上下文热词给 LLM
                 )
+            else:
+                await self._text_output.output(text, paste=paste)
+                get_state().set_output_text(text)
 
-        # 窗口兼容性检测
-        paste = Config.paste
-        window_info = get_active_window_info()
+            # 保存录音与写入 md 文件
+            file_audio = None
+            if Config.save_audio:
+                from util.client.diary.diary_writer import DiaryWriter
 
-        if window_info:
-            window_title = window_info.get('title', '')
-            compatibility_apps = ['weixin', '微信', 'wechat', 'WeChat']
-            if window_title in compatibility_apps:
-                paste = True
-                logger.debug(f"检测到兼容性应用: {window_title}，使用粘贴模式")
+                # 重命名音频文件
+                file_path = self.state.pop_audio_file(message['task_id'])
+                if file_path:
+                    from util.client.audio.file_manager import AudioFileManager
+                    file_manager = AudioFileManager()
+                    file_manager.file_path = file_path
+                    file_audio = file_manager.rename(text, message['time_start'])
+                    logger.debug(f"保存录音文件: {file_audio}")
 
-        # LLM 处理和输出
-        llm_result = None
-        if Config.llm_enabled:
-            from util.llm.llm_process_text import llm_process_text
-            llm_result = await llm_process_text(
-                text,
-                return_result=True,
-                paste=paste,
-                matched_hotwords=potential_hotwords  # 传递上下文热词给 LLM
-            )
-        else:
-            await self._text_output.output(text, paste=paste)
-            get_state().set_output_text(text)
+                # 写入日记
+                diary_writer = DiaryWriter()
+                diary_writer.write(text, message['time_start'], file_audio)
+                logger.debug("写入 MD 文件")
 
-        # 保存录音与写入 md 文件
-        file_audio = None
-        if Config.save_audio:
-            from util.client.diary.diary_writer import DiaryWriter
+            # LLM 结果显示和保存
+            if Config.llm_enabled and llm_result and llm_result.processed:
+                console.print(self._format_llm_result(llm_result))
+                from util.llm.llm_write_md import write_llm_md
+                write_llm_md(
+                    llm_result.input_text,
+                    llm_result.result,
+                    llm_result.role_name,
+                    message['time_start'],
+                    file_audio
+                )
+                logger.debug("写入 LLM MD 文件")
 
-            # 重命名音频文件
-            file_path = self.state.pop_audio_file(message['task_id'])
-            if file_path:
-                from util.client.audio.file_manager import AudioFileManager
-                file_manager = AudioFileManager()
-                file_manager.file_path = file_path
-                file_audio = file_manager.rename(text, message['time_start'])
-                logger.debug(f"保存录音文件: {file_audio}")
+            # 检测修饰键状态（调试用）
+            self._log_modifier_key_state()
 
-            # 写入日记
-            diary_writer = DiaryWriter()
-            diary_writer.write(text, message['time_start'], file_audio)
-            logger.debug("写入 MD 文件")
-
-        # LLM 结果显示和保存
-        if Config.llm_enabled and llm_result and llm_result.processed:
-            console.print(self._format_llm_result(llm_result))
-            from util.llm.llm_write_md import write_llm_md
-            write_llm_md(
-                llm_result.input_text,
-                llm_result.result,
-                llm_result.role_name,
-                message['time_start'],
-                file_audio
-            )
-            logger.debug("写入 LLM MD 文件")
-
-        # 检测修饰键状态（调试用）
-        self._log_modifier_key_state()
-
-        console.line()
+            console.line()
+        finally:
+            if self.state.recording_indicator is not None:
+                try:
+                    self.state.recording_indicator.hide()
+                except Exception as e:
+                    logger.debug(f"failed to hide recording indicator after final result: {e}")
     
     def _cleanup(self) -> None:
         """清理资源"""

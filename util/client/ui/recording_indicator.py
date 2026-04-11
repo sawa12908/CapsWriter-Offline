@@ -114,9 +114,15 @@ class RecordingIndicator:
         except Exception:
             pass
 
-    def show(self) -> None:
+    def show(self, color: str = "red") -> None:
         with self._lock:
-            self._write_command("show", restart_if_needed=True)
+            self._write_command(f"show {color}", restart_if_needed=True)
+
+    def show_recording(self) -> None:
+        self.show("red")
+
+    def show_recognizing(self) -> None:
+        self.show("yellow")
 
     def hide(self) -> None:
         with self._lock:
