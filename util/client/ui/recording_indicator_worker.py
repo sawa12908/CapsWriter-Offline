@@ -173,9 +173,24 @@ class IndicatorApp:
         image.putalpha(mask)
         return image
 
+    def _build_premultiplied_bgra(self) -> bytes:
+        rgba = self._build_dot_image().tobytes("raw", "RGBA")
+        bgra = bytearray(len(rgba))
+
+        for i in range(0, len(rgba), 4):
+            red = rgba[i]
+            green = rgba[i + 1]
+            blue = rgba[i + 2]
+            alpha = rgba[i + 3]
+            bgra[i] = (blue * alpha) // 255
+            bgra[i + 1] = (green * alpha) // 255
+            bgra[i + 2] = (red * alpha) // 255
+            bgra[i + 3] = alpha
+
+        return bytes(bgra)
+
     def _install_bitmap(self) -> None:
-        image = self._build_dot_image()
-        bgra = image.tobytes("raw", "BGRA")
+        bgra = self._build_premultiplied_bgra()
 
         bmi = BITMAPINFO()
         bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)

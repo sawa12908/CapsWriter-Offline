@@ -71,8 +71,6 @@ class ShortcutTask:
         """Ensure stream follows current system default input at a non-critical stage."""
         if not getattr(Config, "keep_mic_stream_open", True):
             return
-        if bool(getattr(Config, "mic_force_preferred_input", False)):
-            return
 
         stream_manager = getattr(self.state, "stream_manager", None)
         if stream_manager is None:
@@ -101,40 +99,7 @@ class ShortcutTask:
 
         try:
             logger.info(f"[{self.shortcut.key}] opening microphone stream on demand")
-            preferred_name = getattr(Config, "mic_preferred_input_name", None)
-            force_preferred = bool(getattr(Config, "mic_force_preferred_input", False))
-            prefer_non_bluetooth = bool(
-                getattr(Config, "mic_auto_prefer_non_bluetooth_input", False)
-            )
-            if force_preferred and not str(preferred_name or "").strip():
-                logger.error(
-                    f"[{self.shortcut.key}] force preferred input enabled but mic_preferred_input_name is empty"
-                )
-                return
-            if preferred_name:
-                stream = stream_manager.open(
-                    preferred_input_name=preferred_name,
-                    fallback_to_default=False,
-                    allow_first_available_fallback=False,
-                )
-                if stream is None:
-                    if force_preferred:
-                        logger.error(
-                            f"[{self.shortcut.key}] preferred input unavailable and force enabled: {preferred_name}"
-                        )
-                        return
-                    logger.warning(
-                        f"[{self.shortcut.key}] preferred input unavailable: {preferred_name}, fallback to default"
-                    )
-                    stream_manager.open(
-                        prefer_non_bluetooth=prefer_non_bluetooth,
-                        allow_first_available_fallback=False,
-                    )
-            else:
-                stream_manager.open(
-                    prefer_non_bluetooth=prefer_non_bluetooth,
-                    allow_first_available_fallback=False,
-                )
+            stream_manager.open()
         except Exception as e:
             logger.warning(f"[{self.shortcut.key}] failed to open microphone stream: {e}")
 

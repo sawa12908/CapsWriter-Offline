@@ -175,7 +175,8 @@ my_files = [
     'hot-server.txt',
     'hot-rule.txt',
     'hot-rectify.txt',
-    'readme.md'
+    'readme.md',
+    'util/client/ui/recording_indicator_worker.py',
 ]
 my_folders = []     # 使用软链接，不再复制
 dest_root = join('dist', basename(coll.name))

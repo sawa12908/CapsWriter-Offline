@@ -1,6 +1,7 @@
 import os
 from platform import system
 import asyncio
+import socket
 import websockets
 from config_server import ServerConfig as Config, __version__
 from util.server.server_ws_recv import ws_recv
@@ -25,6 +26,14 @@ for handler in logger.handlers:
     ws_logger.addHandler(handler)
 
 
+def _ensure_server_port_available() -> None:
+    host = Config.addr
+    port = int(Config.port)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if system() == 'Windows':
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind((host, port))
 
 
 async def run_websocket_server():
@@ -96,10 +105,11 @@ def init():
     logger.info(f"版本: {__version__}")
     logger.info(f"日志级别: {Config.log_level}")
 
-    setup_tray()
     print_banner()
 
     try:
+        _ensure_server_port_available()
+        setup_tray()
         start_recognizer_process()
         asyncio.run(run_websocket_server())
         # 正常退出后的显式清理
@@ -111,7 +121,7 @@ def init():
         lifecycle.cleanup()
     except OSError as e:
         logger.error(f"OSError 错误: {e}")
-        console.print(f'出错了：{e}', style='bright_red'); console.input('...')
+        console.print(f'出错了：{e}', style='bright_red')
         lifecycle.cleanup()
     except Exception as e:
         logger.error(f"未处理的异常: {e}", exc_info=True)

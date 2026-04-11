@@ -201,15 +201,16 @@ def _create_icon(icon_path: Optional[str] = None):
 
 class _TraySystem:
     """托盘系统内部类"""
-    
+
     def __init__(self, name: Optional[str] = None, icon_path: Optional[str] = None, more_options: list = None):
         # 延迟导入 pystray
         import pystray
         from pystray import MenuItem as item
-        
+
         self.hwnd = _get_console_hwnd()
         self.should_exit = False
         self.title = name if name else (os.path.basename(sys.argv[0]) or "Console App")
+        self.icon_id = ''.join(ch.lower() if ch.isalnum() else '_' for ch in self.title).strip('_') or "console_tray"
 
         # 禁用关闭按钮
         if self.hwnd:
@@ -229,7 +230,7 @@ class _TraySystem:
         menu_items.append(item('❌ 退出', self.on_exit))
 
         self.icon = pystray.Icon(
-            "console_tray",
+            self.icon_id,
             _create_icon(icon_path),
             title=f"{self.title}",
             menu=tuple(menu_items)

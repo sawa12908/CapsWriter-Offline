@@ -101,6 +101,12 @@ class ClientState:
         self.recording_has_audio = False
         self.recording_start_time = start_time
 
+        if self.recording_indicator is not None:
+            try:
+                self.recording_indicator.show()
+            except Exception as e:
+                logger.debug(f"failed to show recording indicator on start: {e}")
+
         logger.debug(f"recording state updated: recording=True, start_time={start_time:.2f}")
 
     def mark_recording_audio_started(self, start_time: Optional[float] = None) -> None:

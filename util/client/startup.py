@@ -1,6 +1,7 @@
 # coding: utf-8
 
 import os
+import sys
 from pathlib import Path
 from platform import system
 
@@ -14,7 +15,7 @@ from util.client.ui import RecordingIndicator, TipsDisplay
 from util.hotword import get_hotword_manager
 from util.llm.llm_handler import init_llm_system
 from util.tools.empty_working_set import empty_current_working_set
-from util.tools.windows_privilege import is_process_elevated
+from util.tools.windows_privilege import is_process_elevated, request_admin_restart
 
 from . import logger
 
@@ -42,6 +43,18 @@ def _setup_tray(state, base_dir):
             return
         manager.reopen(reason="tray:restart-audio")
         logger.info("user requested audio restart from tray")
+
+    def restart_capswriter():
+        logger.info("user requested full restart from tray")
+        ok = request_admin_restart(base_dir=base_dir, python_executable=sys.executable)
+        if not ok:
+            _toast("Restart request failed. Please try again as administrator.", duration=3200, bg="#8a3a2f")
+            logger.warning("tray restart request failed to launch elevated helper")
+            return
+
+        _toast("Restarting CapsWriter client and server as administrator...", duration=2600)
+        from util.common.lifecycle import lifecycle
+        lifecycle.request_shutdown(reason="Tray Restart")
 
     def clear_memory():
         from util.llm.llm_handler import clear_llm_history
@@ -92,6 +105,7 @@ def _setup_tray(state, base_dir):
             ("Add Rectify", add_rectify),
             ("Clear Memory", clear_memory),
             ("Restart Audio", restart_audio),
+            ("Restart CapsWriter", restart_capswriter),
         ],
     )
     logger.info("tray icon enabled")
@@ -179,29 +193,7 @@ def setup_client_components(base_dir):
     stream_manager = AudioStreamManager(state)
     state.stream_manager = stream_manager
     if getattr(Config, "keep_mic_stream_open", True):
-        preferred_name = getattr(Config, "mic_preferred_input_name", None)
-        force_preferred = bool(getattr(Config, "mic_force_preferred_input", False))
-        if force_preferred and not str(preferred_name or "").strip():
-            logger.error("force preferred input enabled but mic_preferred_input_name is empty")
-            return state
-        if preferred_name:
-            stream = stream_manager.open(
-                preferred_input_name=preferred_name,
-                fallback_to_default=False,
-                allow_first_available_fallback=False,
-            )
-            if stream is None:
-                if force_preferred:
-                    logger.error(
-                        f"preferred input unavailable at startup with force enabled: {preferred_name}"
-                    )
-                else:
-                    logger.warning(
-                        f"preferred input unavailable at startup: {preferred_name}, fallback to default"
-                    )
-                    stream_manager.open()
-        else:
-            stream_manager.open()
+        stream_manager.open()
     else:
         logger.info("microphone stream lazy mode enabled; idle will not occupy mic")
 

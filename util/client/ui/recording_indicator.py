@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import os
 import subprocess
 import sys
 import threading
@@ -29,14 +30,22 @@ class RecordingIndicator:
     def _is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    def _build_worker_command(self) -> tuple[list[str], dict[str, str]]:
+        env = os.environ.copy()
+        if getattr(sys, "frozen", False):
+            env["CAPSWRITER_RECORDING_INDICATOR_WORKER"] = "1"
+            return [sys.executable], env
+        return [sys.executable, str(self._worker_path)], env
+
     def _start_worker(self) -> None:
         if self._is_running():
             return
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        command, env = self._build_worker_command()
         try:
             self._process = subprocess.Popen(
-                [sys.executable, str(self._worker_path)],
+                command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -44,6 +53,7 @@ class RecordingIndicator:
                 encoding="utf-8",
                 bufsize=1,
                 creationflags=creationflags,
+                env=env,
             )
             logger.debug("recording indicator worker started")
         except Exception as e:

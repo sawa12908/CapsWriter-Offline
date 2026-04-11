@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 # 版本信息
-__version__ = '2.4'
+__version__ = '2.4.7'
 
 # 项目根目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -68,7 +68,6 @@ class ClientConfig:
     # 日志配置
     log_level = 'INFO'          # 日志级别：'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
     keep_mic_stream_open = False   # False=按需打开麦克风，空闲时释放，避免蓝牙耳机被占用
-    mic_preferred_input_name = ''  # 为空则跟随系统默认输入设备
     noise_gate_enabled = True      # True=启用底噪门限，过小音量不发送
     noise_gate_rms_threshold = 0.0002   # RMS 阈值（float32 音频）
     noise_gate_peak_threshold = 0.0012  # Peak 阈值（用于抑制低电平噪声）

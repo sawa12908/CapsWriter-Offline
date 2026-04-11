@@ -655,10 +655,12 @@ class AudioStreamManager:
         if preferred_channels > 1:
             candidate_channels.append(1)
 
-        candidate_rates: List[int] = [int(self.SAMPLE_RATE)]
+        candidate_rates: List[int] = []
         dr = int(float(default_rate or self.SAMPLE_RATE))
-        if dr > 0 and dr not in candidate_rates:
+        if dr > 0:
             candidate_rates.append(dr)
+        if int(self.SAMPLE_RATE) not in candidate_rates:
+            candidate_rates.append(int(self.SAMPLE_RATE))
         if 44100 not in candidate_rates:
             candidate_rates.append(44100)
         if 16000 not in candidate_rates:
@@ -688,91 +690,41 @@ class AudioStreamManager:
                     )
         return None, preferred_channels, int(self.SAMPLE_RATE), last_error
 
-    def open(
-        self,
-        preferred_input_index: Optional[int] = None,
-        preferred_input_name: Optional[str] = None,
-        fallback_to_default: bool = True,
-        allow_first_available_fallback: bool = True,
-        prefer_non_bluetooth: bool = False,
-    ) -> Optional[sd.InputStream]:
+    def open(self) -> Optional[sd.InputStream]:
         with self._stream_lock:
-            candidates: List[Tuple[Optional[int], dict, str, bool]] = []
+            default_infos = self._collect_default_input_candidates()
+            if not default_infos:
+                console.print("no system default input device found", end="\n\n", style="bright_red")
+                logger.error("no system default input device found")
+                return None
 
-            # Preferred by explicit index.
-            if preferred_input_index is not None:
-                try:
-                    info = sd.query_devices(preferred_input_index)
-                    if int(info.get("max_input_channels", 0)) > 0:
-                        candidates.append((int(preferred_input_index), info, "preferred(index)", True))
-                except Exception:
-                    logger.debug(f"preferred index unavailable: {preferred_input_index}")
-
-            # Preferred by name.
-            if not candidates and preferred_input_name:
-                idx = self._find_input_device_index_by_name(preferred_input_name)
-                if idx is not None:
-                    try:
-                        info = sd.query_devices(idx)
-                        if int(info.get("max_input_channels", 0)) > 0:
-                            candidates.append((idx, info, "preferred(name)", True))
-                    except Exception:
-                        logger.debug(f"preferred name unavailable: {preferred_input_name}")
-
-            # Fast path for push-to-talk when no preferred input is configured.
-            if not candidates and prefer_non_bluetooth:
-                candidates.extend(self._collect_non_bluetooth_input_candidates())
-
-            # Current system default (may include multiple hostapi candidates).
-            if not candidates or fallback_to_default:
-                default_infos = self._collect_default_input_candidates()
-                if not default_infos:
-                    info = self._resolve_default_input_info(
-                        allow_first_available=allow_first_available_fallback
-                    )
-                    if info is not None:
-                        default_infos = [info]
-
-                for info in default_infos:
-                    idx = int(info.get("index", -1))
-                    source = str(info.get("source", "system-default"))
-                    try:
-                        query_index = idx if idx >= 0 else None
-                        dev = (
-                            sd.query_devices(query_index, "input")
-                            if query_index is not None
-                            else sd.query_devices(kind="input")
-                        )
-                        if isinstance(dev, dict):
-                            dev = dict(dev)
-                            dev["source"] = source
-                        candidates.append(
-                            (idx if idx >= 0 else None, dev, f"system-default:{source}", False)
-                        )
-                    except Exception:
-                        # Keep original resolved info if query by kind failed.
-                        candidates.append(
-                            (idx if idx >= 0 else None, info, f"system-default:{source}", False)
-                        )
-
-            # De-duplicate by signature.
-            deduped: List[Tuple[Optional[int], dict, str, bool]] = []
+            candidates: List[Tuple[Optional[int], dict, str]] = []
             seen = set()
-            for idx, dev, label, is_preferred in candidates:
+            for info in default_infos:
+                idx = int(info.get("index", -1))
+                source = str(info.get("source", "system-default"))
+                try:
+                    query_index = idx if idx >= 0 else None
+                    dev = (
+                        sd.query_devices(query_index, "input")
+                        if query_index is not None
+                        else sd.query_devices(kind="input")
+                    )
+                    if isinstance(dev, dict):
+                        dev = dict(dev)
+                        dev["source"] = source
+                except Exception:
+                    dev = info
+
                 name = str(dev.get("name", "")) if isinstance(dev, dict) else ""
                 hostapi = int(dev.get("hostapi", -1)) if isinstance(dev, dict) else -1
-                sig = (int(idx) if idx is not None else -1, hostapi, name)
+                sig = (idx if idx >= 0 else -1, hostapi, name)
                 if sig in seen:
                     continue
                 seen.add(sig)
-                deduped.append((idx, dev, label, is_preferred))
+                candidates.append((idx if idx >= 0 else None, dev, f"system-default:{source}"))
 
-            if not deduped:
-                console.print("no input device found", end="\n\n", style="bright_red")
-                logger.error("no input device found")
-                return None
-
-            for device_index, device, label, is_preferred in deduped:
+            for device_index, device, label in candidates:
                 if not isinstance(device, dict) or int(device.get("max_input_channels", 0)) <= 0:
                     continue
 
@@ -788,7 +740,6 @@ class AudioStreamManager:
                     )
                     continue
 
-                # Resolve actual opened device info.
                 actual_info = None
                 try:
                     if device_index is None:
@@ -810,7 +761,6 @@ class AudioStreamManager:
                 if bool(getattr(Config, "keep_mic_stream_open", True)):
                     self._start_default_input_listener()
                 else:
-                    # On-demand mode: skip per-record listener startup/shutdown overhead.
                     self._listener_mode = None
 
                 console.print(
@@ -824,7 +774,7 @@ class AudioStreamManager:
                 )
                 return stream
 
-            logger.error("all candidate input devices failed to open")
+            logger.error("system default input devices failed to open")
             return None
 
     def close(self, stop_listener: bool = True) -> None:
@@ -886,57 +836,18 @@ class AudioStreamManager:
 
         try:
             logger.info(f"reopening audio stream, reason: {reason}")
-            strict_default_follow = reason.startswith("shortcut:") or reason.startswith("WM_")
-            preferred_name_cfg = getattr(Config, "mic_preferred_input_name", None)
-            force_preferred_cfg = bool(getattr(Config, "mic_force_preferred_input", False))
 
-            previous_index = self._current_input_index
-            previous_name = self._current_input_name
-
-            # Keep listener alive during reopen to avoid event gaps.
             self.close(stop_listener=False)
             time.sleep(0.08)
 
-            if strict_default_follow:
-                self._refresh_portaudio(reason=f"pre-reopen:{reason}")
-                time.sleep(0.05)
+            self._refresh_portaudio(reason=f"pre-reopen:{reason}")
+            time.sleep(0.05)
 
-            if reason == "stream finished unexpectedly" and not force_preferred_cfg:
-                stream = self.open(
-                    preferred_input_index=previous_index,
-                    preferred_input_name=previous_name,
-                    fallback_to_default=True,
-                    allow_first_available_fallback=not strict_default_follow,
-                )
-                if stream is not None:
-                    return stream
-
-            preferred_name = preferred_name_cfg
-            force_preferred = force_preferred_cfg
-
-            if preferred_name:
-                stream = self.open(
-                    preferred_input_name=preferred_name,
-                    fallback_to_default=False,
-                    allow_first_available_fallback=False,
-                )
-                if stream is not None:
-                    return stream
-                if force_preferred:
-                    logger.error(
-                        f"preferred input unavailable during reopen with force enabled: {preferred_name}"
-                    )
-                    return None
-                logger.warning(f"preferred input unavailable during reopen: {preferred_name}, fallback to default")
-
-            stream = self.open(allow_first_available_fallback=not strict_default_follow)
+            stream = self.open()
             if stream is not None:
                 return stream
 
-            logger.warning("regular reopen failed, try reloading PortAudio")
-            self._refresh_portaudio(reason=f"retry:{reason}")
-
-            time.sleep(0.15)
-            return self.open(allow_first_available_fallback=True)
+            logger.error("reopen failed: system default input device unavailable")
+            return None
         finally:
             self._reopen_lock.release()
