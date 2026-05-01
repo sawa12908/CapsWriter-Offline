@@ -93,20 +93,46 @@ def _setup_tray(state, base_dir):
 
             copy_to_clipboard(text)
 
+    # 开机启动
+    try:
+        from util.tools.startup_manager import is_startup_enabled, set_startup
+
+        has_startup = True
+    except Exception as e:
+        logger.debug(f"startup manager import failed: {e}")
+        has_startup = False
+
+    def toggle_startup(icon, item):
+        if not has_startup:
+            return
+        current = is_startup_enabled()
+        success = set_startup(not current, base_dir)
+        if success:
+            status = "已启用" if not current else "已取消"
+            _toast(f"开机启动 {status}")
+            logger.info(f"startup toggled: {not current}")
+        else:
+            _toast("设置开机启动失败", bg="#8a3a2f")
+            logger.warning("failed to toggle startup setting")
+
     icon_path = os.path.join(base_dir, "assets", "icon.ico")
+    more_options = [
+        ("复制上次结果", copy_last_result),
+        ("编辑上下文", add_context),
+        ("添加热词", add_hotword),
+        ("添加纠错", add_rectify),
+        ("清空记忆", clear_memory),
+        ("重启音频", restart_audio),
+        ("重启软件", restart_capswriter),
+    ]
+    if has_startup:
+        more_options.insert(0, ("开机启动", toggle_startup, lambda item: is_startup_enabled()))
+
     enable_min_to_tray(
-        "CapsWriter Client",
+        "CapsWriter 客户端",
         icon_path,
         exit_callback=request_exit_from_tray,
-        more_options=[
-            ("Copy Last Result", copy_last_result),
-            ("Edit Context", add_context),
-            ("Add Hotword", add_hotword),
-            ("Add Rectify", add_rectify),
-            ("Clear Memory", clear_memory),
-            ("Restart Audio", restart_audio),
-            ("Restart CapsWriter", restart_capswriter),
-        ],
+        more_options=more_options,
     )
     logger.info("tray icon enabled")
 

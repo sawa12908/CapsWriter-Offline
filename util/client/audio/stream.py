@@ -724,6 +724,32 @@ class AudioStreamManager:
                 seen.add(sig)
                 candidates.append((idx if idx >= 0 else None, dev, f"system-default:{source}"))
 
+            for idx, dev, source, _ in self._collect_non_bluetooth_input_candidates():
+                name = str(dev.get("name", "")) if isinstance(dev, dict) else ""
+                hostapi = int(dev.get("hostapi", -1)) if isinstance(dev, dict) else -1
+                sig = (idx if idx is not None and idx >= 0 else -1, hostapi, name)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                candidates.append((idx if idx is not None and idx >= 0 else None, dev, source))
+
+            try:
+                for idx, dev in enumerate(sd.query_devices()):
+                    if int(dev.get("max_input_channels", 0)) <= 0:
+                        continue
+                    name = str(dev.get("name", ""))
+                    hostapi = int(dev.get("hostapi", -1))
+                    sig = (int(idx), hostapi, name)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    candidates.append((int(idx), dict(dev), "first-available-fallback"))
+            except Exception as e:
+                logger.debug(f"enumerate input devices for fallback failed: {e}")
+
+            if len(candidates) > len(default_infos):
+                logger.warning("system default input will fallback to other available input devices if needed")
+
             for device_index, device, label in candidates:
                 if not isinstance(device, dict) or int(device.get("max_input_channels", 0)) <= 0:
                     continue
@@ -774,7 +800,7 @@ class AudioStreamManager:
                 )
                 return stream
 
-            logger.error("system default input devices failed to open")
+            logger.error("all candidate input devices failed to open")
             return None
 
     def close(self, stop_listener: bool = True) -> None:
@@ -847,7 +873,7 @@ class AudioStreamManager:
             if stream is not None:
                 return stream
 
-            logger.error("reopen failed: system default input device unavailable")
+            logger.error("reopen failed: no available input device could be opened")
             return None
         finally:
             self._reopen_lock.release()

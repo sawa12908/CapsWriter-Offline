@@ -114,8 +114,7 @@ Where-Object {{
     (
         $_.Name -match 'python|pythonw' -and
         $_.CommandLine -and
-        $_.CommandLine -like "*${{repo}}*" -and
-        ($_.CommandLine -match 'start_server\.py|start_client\.py|recording_indicator_worker\.py')
+        $_.CommandLine -match 'start_server\.py|start_client\.py|recording_indicator_worker\.py'
     ) -or (
         $_.ExecutablePath -and
         $_.ExecutablePath -like "*${{exeDir}}*" -and
@@ -162,7 +161,6 @@ Where-Object {{
         (
             $_.Name -match 'python|pythonw' -and
             $_.CommandLine -and
-            $_.CommandLine -like "*${{repo}}*" -and
             $_.CommandLine -like "*{script_name}*" -and
             $_.ExecutablePath -and
             $_.ExecutablePath -eq $pythonPath

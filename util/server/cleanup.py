@@ -72,7 +72,7 @@ def setup_tray():
     if Config.enable_tray:
         from util.server.ui import enable_min_to_tray
         icon_path = os.path.join(BASE_DIR, 'assets', 'icon.ico')
-        enable_min_to_tray('CapsWriter Server', icon_path, exit_callback=request_exit_from_tray)
+        enable_min_to_tray('CapsWriter 服务端', icon_path, exit_callback=request_exit_from_tray)
         logger.info("托盘图标已启用")
 
 

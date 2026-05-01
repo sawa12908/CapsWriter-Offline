@@ -225,8 +225,16 @@ class _TraySystem:
 
         # 添加额外选项
         if more_options:
-            for opt_name, opt_func in more_options:
-                menu_items.append(item(opt_name, opt_func))
+            for opt in more_options:
+                if isinstance(opt, (list, tuple)):
+                    if len(opt) == 2:
+                        menu_items.append(item(opt[0], opt[1]))
+                    elif len(opt) == 3:
+                        menu_items.append(item(opt[0], opt[1], checked=opt[2]))
+                    else:
+                        menu_items.append(item(*opt))
+                else:
+                    menu_items.append(opt)
 
         menu_items.append(item('❌ 退出', self.on_exit))
 
