@@ -1,6 +1,9 @@
 # coding: utf-8
 """
-WebSocket 连接管理模块
+[DEPRECATED] WebSocket 连接管理模块
+
+process-merge 后已废弃：WebSocket 通信已被 RecognitionBridge + multiprocessing.Queue 替代。
+本模块保留仅用于向后兼容，新代码不应使用。
 
 提供 WebSocketManager 类用于管理与服务端的 WebSocket 连接，
 包括连接建立、重连、消息发送和连接状态检查。

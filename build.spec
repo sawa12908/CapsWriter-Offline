@@ -1,26 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-现代化 PyInstaller 打包配置
+现代化 PyInstaller 打包配置（单 EXE 模式）
 适配 PyInstaller 6.0+ 版本
+
+process-merge 后：server 逻辑已内嵌到 client，只打包一个 CapsWriter-Offline.exe
+
+增量构建策略：
+- COLLECT 到临时目录 → 只把 EXE 复制到目标 dist
+- internal/ 目录只在首次创建，后续不重建（依赖没变）
+- util/LLM/models/assets 用 junction 链接源码，改源码直接生效
 """
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
-# from PyInstaller.building.build_main import Analysis, COLLECT
 from os.path import join, basename, dirname, exists
-from os import walk, makedirs
-from shutil import copyfile, rmtree
+from os import walk, makedirs, unlink
+from shutil import copyfile, rmtree, move
+from platform import system
+
 
 # ==================== 打包配置选项 ====================
 
 # 是否收集 CUDA provider
-# - True: 包含 onnxruntime_providers_cuda.dll，支持 GPU 加速（需要在用户机器安装 CUDA 和 CUDNN）
-# - False: 不包含 CUDA provider，只使用 CPU 模式（打包体积更小，兼容性更好）
 INCLUDE_CUDA_PROVIDER = False
 
 # ====================================================
 
 
-# 初始化空列表
 binaries = []
 hiddenimports = []
 datas = []
@@ -29,12 +34,9 @@ datas = []
 try:
     sherpa_datas = collect_data_files('sherpa_onnx', include_py_files=False)
 
-    # 根据 INCLUDE_CUDA_PROVIDER 决定是否收集 CUDA provider
     if not INCLUDE_CUDA_PROVIDER:
-        # 过滤掉 CUDA provider 文件
         filtered_datas = []
         for src, dest in sherpa_datas:
-            # 检查是否是 CUDA provider 相关文件
             if 'providers_cuda' not in basename(src).lower():
                 filtered_datas.append((src, dest))
             else:
@@ -54,7 +56,14 @@ try:
 except:
     pass
 
-# 隐藏导入 - 确保所有需要的模块都被包含
+# 收集 rich 子模块（Markdown 渲染需要）
+try:
+    rich_submodules = collect_submodules('rich._unicode_data')
+    hiddenimports += rich_submodules
+    print(f"[INFO] 收集到 {len(rich_submodules)} 个 rich._unicode_data 子模块")
+except Exception as e:
+    print(f"[WARNING] 收集 rich 子模块失败: {e}")
+
 hiddenimports += [
     'websockets',
     'websockets.client',
@@ -62,24 +71,23 @@ hiddenimports += [
     'rich',
     'rich.console',
     'rich.markdown',
-    'rich._unicode_data.unicode17-0-0',
     'keyboard',
     'pyclip',
     'numpy',
-    'numba', 
+    'numba',
     'sounddevice',
     'pypinyin',
     'watchdog',
     'typer',
     'srt',
     'sherpa_onnx',
-    'PIL',           # Pillow 用于托盘图标
+    'PIL',
     'PIL.Image',
-    'pystray',       # 托盘图标库
+    'pystray',
 ]
 
-a_1 = Analysis(
-    ['start_server.py'],
+a = Analysis(
+    ['core_client.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -90,52 +98,14 @@ a_1 = Analysis(
     excludes=['IPython',
               'PySide6', 'PySide2', 'PyQt5',
               'matplotlib', 'wx',
-              'funasr', 'pydantic', 'torch',
+              'funasr', 'torch',
               ],
     noarchive=False,
 )
 
 # 过滤掉从二进制依赖分析中收集的 DLL
-# 这些 DLL 是 PyInstaller 在分析 DLL 依赖时自动收集的
-# 我们排除从系统 CUDA 安装目录收集的 DLL（它们应该运行时从系统加载）
 filtered_binaries = []
-for name, src, type in a_1.binaries:
-    src_lower = src.lower() if isinstance(src, str) else ''
-    is_system_cuda_dll = (
-        '\\nvidia gpu computing toolkit\\cuda\\' in src_lower or
-        '\\nvidia\\cudnn\\' in src_lower or
-        ('\\cuda\\v' in src_lower and '\\bin\\' in src_lower)
-    )
-    is_unwanted_onnx_dll = (
-        'onnxruntime_providers_cuda.dll' in name.lower() 
-    )
-
-    if not is_system_cuda_dll and not is_unwanted_onnx_dll:
-        filtered_binaries.append((name, src, type))
-    else:
-        reason = "环境 CUDA DLL" if is_system_cuda_dll else "冗余 ONNX DLL"
-        print(f"[INFO] 排除 {reason}: {name} (从 {src} 收集)")
-a_1.binaries = filtered_binaries
-
-a_2 = Analysis(
-    ['start_client.py'],
-    pathex=[],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=['build_hook.py'],
-    excludes=['IPython',
-              'PySide6', 'PySide2', 'PyQt5',
-              'matplotlib', 'wx',
-              ],
-    noarchive=False,
-)
-
-# 客户端也过滤从系统 CUDA 目录收集的 DLL（保持一致性）
-filtered_binaries = []
-for name, src, type in a_2.binaries:
+for name, src, type in a.binaries:
     src_lower = src.lower() if isinstance(src, str) else ''
     is_system_cuda_dll = (
         '\\nvidia gpu computing toolkit\\cuda\\' in src_lower or
@@ -152,96 +122,110 @@ for name, src, type in a_2.binaries:
     else:
         reason = "环境 CUDA DLL" if is_system_cuda_dll else "冗余 ONNX DLL"
         print(f"[INFO] 排除 {reason}: {name} (从 {src} 收集)")
-a_2.binaries = filtered_binaries
+a.binaries = filtered_binaries
 
-
-# 排除不要打包的模块（这些将作为源文件复制）
-private_module = ['util', 'config_client', 'config_server', 'LLM', 
-                  'core_server',
-                  'core_client',
+# 排除不要打包的模块（这些将作为源文件复制到 dist）
+private_module = ['util', 'config_client', 'config_server', 'LLM',
+                  'core_server', 'core_client',
                   ]
 
-pure = a_1.pure.copy()
-a_1.pure.clear()
+pure = a.pure.copy()
+a.pure.clear()
 for name, src, type in pure:
     condition = [name == m or name.startswith(m + '.') for m in private_module]
     if condition and any(condition):
         ...
     else:
-        a_1.pure.append((name, src, type))
+        a.pure.append((name, src, type))
 
-pure = a_2.pure.copy()
-a_2.pure.clear()
-for name, src, type in pure:
-    condition = [name == m or name.startswith(m + '.') for m in private_module]
-    if condition and any(condition):
-        ...
-    else:
-        a_2.pure.append((name, src, type))
+pyz = PYZ(a.pure)
 
-
-pyz_1 = PYZ(a_1.pure)
-pyz_2 = PYZ(a_2.pure)
-
-
-exe_1 = EXE(
-    pyz_1,
-    a_1.scripts,
+exe = EXE(
+    pyz,
+    a.scripts,
     [],
     exclude_binaries=True,
-    name='start_server',
+    name='CapsWriter-Offline',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets\\\\icon.ico'],
-    # 所有第三方依赖放入 internal 目录
-    contents_directory='internal',
-)
-exe_2 = EXE(
-    pyz_2,
-    a_2.scripts,
-    [],
-    exclude_binaries=True,
-    name='start_client',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['assets\\\\icon.ico'],
-    # 所有第三方依赖放入 internal 目录
     contents_directory='internal',
 )
 
+# COLLECT 到临时目录，然后增量复制到目标
+tmp_root = join('dist', '_coll_temp')
+if exists(tmp_root):
+    rmtree(tmp_root)
 coll = COLLECT(
-    exe_1,
-    a_1.binaries,
-    a_1.datas,
-
-    exe_2,
-    a_2.binaries,
-    a_2.datas,
-
+    exe,
+    a.binaries,
+    a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='CapsWriter-Offline',
+    name='_coll_temp',
 )
 
+# ========== 增量部署到 dist/CapsWriter-Offline ==========
 
-# 复制额外所需的文件（只复制用户自己写的文件）
+dest_root = join('dist', 'CapsWriter-Offline')
+
+# 1. 复制 EXE（每次都更新）
+# EXE 设置了 exclude_binaries=True，单独生成在 build/build/ 下
+exe_name = 'CapsWriter-Offline.exe'
+tmp_exe = join('build', 'build', exe_name)
+dest_exe = join(dest_root, exe_name)
+if exists(tmp_exe):
+    makedirs(dest_root, exist_ok=True)
+    if exists(dest_exe):
+        try:
+            unlink(dest_exe)
+        except PermissionError:
+            bak = dest_exe + '.old'
+            if exists(bak):
+                unlink(bak)
+            move(dest_exe, bak)
+            print(f"[INFO] 旧 EXE 正在使用，已重命名为 .old")
+    copyfile(tmp_exe, dest_exe)
+    print(f"[INFO] EXE 已更新: {dest_exe}")
+
+# 2. internal/ 目录只在首次创建
+tmp_internal = join(tmp_root, 'internal')
+dest_internal = join(dest_root, 'internal')
+if exists(tmp_internal) and not exists(dest_internal):
+    move(tmp_internal, dest_internal)
+    print(f"[INFO] internal/ 已创建: {dest_internal}")
+elif exists(tmp_internal):
+    rmtree(tmp_internal)
+    print(f"[INFO] internal/ 已存在，跳过")
+
+# 3. 为 models 等大文件夹建立目录连接符（必须在复制文件之前）
+if system() == 'Windows':
+    from _winapi import CreateJunction
+    link_folders = ['models', 'assets', 'util', 'LLM']
+    for folder in link_folders:
+        src_folder = join(os.getcwd(), folder)
+        if not exists(src_folder):
+            continue
+        dest_folder = join(dest_root, folder)
+        if exists(dest_folder):
+            continue
+        try:
+            CreateJunction(src_folder, dest_folder)
+            print(f"[INFO] Junction created: {dest_folder} -> {src_folder}")
+        except Exception as e:
+            print(f'警告：无法创建目录连接符 {dest_folder}: {e}')
+
+# 4. 复制额外所需的文件（仅首次或文件缺失时）
+# 注意：util/ 已是 junction，复制文件会直接写入源码目录
 my_files = [
     'config_client.py',
     'config_server.py',
@@ -254,10 +238,8 @@ my_files = [
     'readme.md',
     'util/client/ui/recording_indicator_worker.py',
 ]
-my_folders = []     # 这里是要复制的文件夹
-dest_root = join('dist', basename(coll.name))
+my_folders = []
 
-# 复制文件夹中的文件
 for folder in my_folders:
     if not exists(folder):
         continue
@@ -267,33 +249,18 @@ for folder in my_folders:
             if exists(src_file):
                 my_files.append(src_file)
 
-# 执行文件复制到根目录（不是 internal）
 for file in my_files:
     if not exists(file):
         continue
-    # 保持相对路径结构
     rel_path = file.replace('\\', '/') if '\\' in file else file
     dest_file = join(dest_root, rel_path)
+    if exists(dest_file):
+        continue
     dest_folder = dirname(dest_file)
     makedirs(dest_folder, exist_ok=True)
     copyfile(file, dest_file)
 
-
-# 为 models 文件夹建立链接，免去复制大文件
-from platform import system
-from subprocess import run
-
-if system() == 'Windows':
-    link_folders = ['models', 'assets', 'util', 'LLM',  'log']  # 不再链接 util，因为 util 已经被复制
-    for folder in link_folders:
-        if not exists(folder):
-            continue
-        dest_folder = join(dest_root, folder)
-        if exists(dest_folder):
-            rmtree(dest_folder)
-        # 使用管理员权限运行的命令提示符来创建目录连接符
-        cmd = ['mklink', '/j', dest_folder, folder]
-        try:
-            run(cmd, shell=True, check=True)
-        except:
-            print(f'警告：无法创建目录连接符 {dest_folder}，请手动创建或复制文件夹')
+# 5. 清理临时 COLLECT 目录
+if exists(tmp_root):
+    rmtree(tmp_root)
+    print(f"[INFO] 临时目录已清理: {tmp_root}")

@@ -2,29 +2,29 @@
 """
 识别结果处理模块
 
-提供 ResultProcessor 类用于处理服务端返回的识别结果。
+提供 ResultProcessor 类用于处理识别结果。
+
+process-merge: 不再通过 WebSocket 接收 JSON 消息，
+改为通过 RecognitionBridge.on_result 回调直接接收 RecognitionOutput 数据类。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Optional
 
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-
 from config_client import ClientConfig as Config
-from util.client.state import console
-from util.client.websocket_manager import WebSocketManager
+from util.app_state import console
 from util.hotword import get_hotword_manager
 from util.client.output.text_output import TextOutput
 from util.tools.window_detector import get_active_window_info
 from . import logger
 from util.common.lifecycle import lifecycle
-from util.client.state import get_state
+from util.app_state import get_state
 
 if TYPE_CHECKING:
-    from util.client.state import ClientState
+    from util.app_state import AppState
+    from util.recognition_protocol import RecognitionOutput
 
 
 
@@ -39,25 +39,26 @@ def _estimate_tokens(text: str) -> int:
 
 class ResultProcessor:
     """
-    识别结果处理器
-    
-    负责处理服务端返回的识别结果：
-    - 接收 WebSocket 消息
+    识别结果处理器（process-merge 改造）
+
+    通过 RecognitionBridge.on_result 回调接收 RecognitionOutput，
+    不再通过 WebSocket 接收 JSON 消息。
+
+    负责处理识别结果：
     - 执行热词替换
     - 可选地调用 LLM 进行润色
     - 输出最终文本
     - 保存录音和日记
     """
-    
-    def __init__(self, state: 'ClientState'):
+
+    def __init__(self, state: 'AppState'):
         """
         初始化结果处理器
 
         Args:
-            state: 客户端状态实例
+            state: AppState 实例
         """
         self.state = state
-        self._ws_manager = WebSocketManager(state)
         self._hotword_manager = get_hotword_manager()
         self._text_output = TextOutput()
         self._exit_event = asyncio.Event()
@@ -181,107 +182,46 @@ class ResultProcessor:
             logger.error(f"执行快捷键失败 {keys_str}: {e}")
     
     async def process_loop(self) -> None:
-        """主处理循环"""
-        if not await self._ws_manager.connect():
-            logger.warning("WebSocket 连接检查失败")
-            return
+        """
+        主处理循环（process-merge 改造）
 
-        console.print('[green]连接成功\n')
-        logger.info("WebSocket 连接成功")
+        不再通过 WebSocket 接收消息，识别结果通过 _handle_result 回调接收。
+        本循环仅等待退出信号。
+        """
+        logger.info("结果处理器就绪，等待识别结果...")
 
         try:
-            while True:
-                # 检查退出事件
-                if self._exit_event.is_set():
-                    logger.info("检测到退出事件，停止处理循环")
-                    break
-
-                # 创建一个任务来接收消息
-                recv_task = asyncio.create_task(self.state.websocket.recv())
-                logger.debug("已创建接收消息任务")
-
-                # 创建一个任务来等待退出事件
-                exit_wait_task = asyncio.create_task(self._exit_event.wait())
-                logger.debug("已创建退出等待任务")
-
-                # 等待任意一个任务完成
-                done, pending = await asyncio.wait(
-                    [recv_task, exit_wait_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                logger.debug(f"任务完成: done={len(done)}, pending={len(pending)}")
-
-                # 取消未完成的任务
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                # 检查是否是退出请求
-                if exit_wait_task in done:
-                    logger.info("收到退出请求，停止处理循环")
-                    # 取消接收任务
-                    if recv_task not in done and not recv_task.done():
-                        recv_task.cancel()
-                        try:
-                            await recv_task
-                        except asyncio.CancelledError:
-                            pass
-                    break
-
-                # 如果是接收任务完成，处理消息
-                if recv_task in done:
-                    try:
-                        message = recv_task.result()
-                        # 再次检查退出标志
-                        if lifecycle.is_shutting_down:
-                            logger.info("处理消息前检测到退出请求")
-                            break
-                        logger.debug("开始处理消息")
-                        await self._handle_message(message)
-                        logger.debug("消息处理完成")
-                    except asyncio.CancelledError:
-                        raise
-                    except ConnectionClosedError:
-                        logger.warning("WebSocket 连接已关闭")
-                        break
-                    except Exception as e:
-                        logger.error(f"处理消息时发生错误: {e}", exc_info=True)
-                        raise
-
-        except ConnectionClosedError:
-            console.print('[red]连接断开\n')
-            logger.error("WebSocket 连接断开")
-        except ConnectionClosedOK:
-            console.print('[yellow]连接已正常关闭\n')
-            logger.info("WebSocket 连接已正常关闭")
+            # 等待退出事件
+            await self._exit_event.wait()
+            logger.info("检测到退出事件，停止处理循环")
         except asyncio.CancelledError:
             logger.info("处理循环被取消")
             raise
         except Exception as e:
-            logger.error(f"接收结果时发生错误: {e}", exc_info=True)
-            print(e)
+            logger.error(f"处理循环发生错误: {e}", exc_info=True)
         finally:
             self._cleanup()
 
-    async def _handle_message(self, message: str) -> None:
-        """处理接收到的消息"""
-        import json
-        
+    async def _handle_result(self, output: 'RecognitionOutput') -> None:
+        """
+        处理识别结果（process-merge 改造）
+
+        通过 RecognitionBridge.on_result 回调接收 RecognitionOutput 数据类，
+        不再解析 JSON 字符串。热词替换、LLM 润色、上屏逻辑保持不变。
+
+        Args:
+            output: RecognitionOutput 数据类实例
+        """
         # 再次检查退出标志
         if lifecycle.is_shutting_down:
             return
 
-        message = json.loads(message)
-
         # 使用 text 字段（简单拼接结果，用于语音输入）
-        text = message['text']
+        text = output.text
         original_text = text  # 保存原始识别结果
-        delay = message['time_complete'] - message['time_submit']
+        delay = output.time_complete - output.time_submit
 
-        if message['is_final']:
+        if output.is_final:
             logger.info(f"收到最终识别结果: {text}, 时延: {delay:.2f}s")
         else:
             logger.debug(
@@ -296,7 +236,7 @@ class ResultProcessor:
                 logger.debug(f"failed to switch recording indicator to recognizing: {e}")
 
         # 如果非最终结果，继续等待
-        if not message['is_final']:
+        if not output.is_final:
             return
 
         try:
@@ -304,7 +244,7 @@ class ResultProcessor:
             sil_clean = TextOutput.strip_punc(str(text)).strip().lower()
             if sil_raw in {'/sil', 'sil', '[sil]', '<sil>'} or sil_clean in {'/sil', 'sil'}:
                 logger.info("忽略静音识别结果 /sil")
-                file_path = self.state.pop_audio_file(message.get('task_id'))
+                file_path = self.state.pop_audio_file(output.task_id)
                 if file_path:
                     try:
                         file_path.unlink(missing_ok=True)
@@ -361,13 +301,6 @@ class ResultProcessor:
                     shortcut_keys = steps[0]
                     console.print(f'    [bold magenta]执行快捷键：{clean_text} -> {shortcut_keys}[/]')
                     self._trigger_shortcut(shortcut_keys)
-
-                console.line()
-                return  # 阻止后续文本输出和 LLM 处理
-
-                # 播放提示音（可选）
-                # import winsound
-                # winsound.Beep(1000, 100)
 
                 console.line()
                 return  # 阻止后续文本输出和 LLM 处理
@@ -451,17 +384,17 @@ class ResultProcessor:
                 from util.client.diary.diary_writer import DiaryWriter
 
                 # 重命名音频文件
-                file_path = self.state.pop_audio_file(message['task_id'])
+                file_path = self.state.pop_audio_file(output.task_id)
                 if file_path:
                     from util.client.audio.file_manager import AudioFileManager
                     file_manager = AudioFileManager()
                     file_manager.file_path = file_path
-                    file_audio = file_manager.rename(text, message['time_start'])
+                    file_audio = file_manager.rename(text, output.time_start)
                     logger.debug(f"保存录音文件: {file_audio}")
 
                 # 写入日记
                 diary_writer = DiaryWriter()
-                diary_writer.write(text, message['time_start'], file_audio)
+                diary_writer.write(text, output.time_start, file_audio)
                 logger.debug("写入 MD 文件")
 
             # LLM 结果显示和保存
@@ -472,7 +405,7 @@ class ResultProcessor:
                     llm_result.input_text,
                     llm_result.result,
                     llm_result.role_name,
-                    message['time_start'],
+                    output.time_start,
                     file_audio
                 )
                 logger.debug("写入 LLM MD 文件")
@@ -489,11 +422,5 @@ class ResultProcessor:
                     logger.debug(f"failed to hide recording indicator after final result: {e}")
     
     def _cleanup(self) -> None:
-        """清理资源"""
-        if self.state.websocket is not None:
-            try:
-                if self.state.websocket.closed:
-                    self.state.websocket = None
-                    logger.debug("WebSocket 连接已清理")
-            except Exception:
-                self.state.websocket = None
+        """清理资源（process-merge: 不再需要关闭 WebSocket）"""
+        logger.debug("结果处理器资源清理完成")

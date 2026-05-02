@@ -19,7 +19,10 @@ def start_recognizer_process():
 
     state = get_state()
     Cosmic.sockets_id = Manager().list()
-    stdin_fn = sys.stdin.fileno()
+    if sys.stdin is None:
+        stdin_fn = os.open(os.devnull, os.O_RDONLY)
+    else:
+        stdin_fn = sys.stdin.fileno()
     recognize_process = Process(target=init_recognizer,
                                 args=(Cosmic.queue_in,
                                       Cosmic.queue_out,

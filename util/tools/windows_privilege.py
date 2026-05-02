@@ -28,6 +28,11 @@ def is_process_elevated() -> bool:
         return False
 
 
+def _is_frozen_exe() -> bool:
+    """Return True if running inside a PyInstaller-frozen executable."""
+    return getattr(sys, 'frozen', False)
+
+
 def request_admin_restart(base_dir: str, python_executable: str | None = None) -> bool:
     """Start an elevated helper that restarts the CapsWriter client and server."""
     if system() != "Windows":
@@ -35,6 +40,38 @@ def request_admin_restart(base_dir: str, python_executable: str | None = None) -
 
     repo_dir = Path(base_dir).resolve()
     python_path = str(Path(python_executable or sys.executable).resolve())
+
+    if _is_frozen_exe():
+        # EXE 环境：直接以管理员权限重启自身，不需要 helper 脚本
+        if is_process_elevated():
+            try:
+                subprocess.Popen(
+                    [python_path],
+                    cwd=str(repo_dir),
+                    stdout=None,
+                    stderr=None,
+                    stdin=None,
+                    close_fds=True,
+                    creationflags=_visible_creationflags(),
+                )
+                return True
+            except Exception:
+                return False
+
+        try:
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                python_path,
+                "",
+                str(repo_dir),
+                1,
+            )
+            return result > 32
+        except Exception:
+            return False
+
+    # 源码环境：通过 helper 脚本重启
     helper_script = Path(__file__).resolve()
     params = subprocess.list2cmdline(
         [
@@ -104,30 +141,8 @@ def _launch_executable(executable_path: Path, working_dir: Path) -> None:
 
 
 def _terminate_capswriter_processes(base_dir: Path) -> None:
-    repo = str(base_dir).replace("'", "''")
-    exe_dir = str(base_dir / "dist" / "CapsWriter-Offline").replace("'", "''")
-    script = rf"""
-$repo = '{repo}'
-$exeDir = '{exe_dir}'
-Get-CimInstance Win32_Process |
-Where-Object {{
-    (
-        $_.Name -match 'python|pythonw' -and
-        $_.CommandLine -and
-        $_.CommandLine -match 'start_server\.py|start_client\.py|recording_indicator_worker\.py'
-    ) -or (
-        $_.ExecutablePath -and
-        $_.ExecutablePath -like "*${{exeDir}}*" -and
-        $_.Name -match 'start_server|start_client'
-    )
-}} |
-Sort-Object ProcessId -Descending |
-ForEach-Object {{
-    try {{ taskkill /PID $_.ProcessId /T /F | Out-Null }} catch {{ }}
-}}
-""".strip()
     subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command", script],
+        ["taskkill", "/F", "/IM", "CapsWriter-Offline.exe"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -145,38 +160,14 @@ def ensure_single_instance(base_dir: str, role: str, python_executable: str | No
     if role not in {"client", "server"}:
         raise ValueError(f"unsupported CapsWriter role: {role}")
 
+    # 非管理员进程无法杀掉管理员进程，跳过（提权后会再调用一次）
+    if not is_process_elevated():
+        return
+
     current_pid = subprocess.os.getpid()
-    python_path = str(Path(python_executable or sys.executable).resolve())
-    script_name = f"start_{role}.py"
-    exe_name = f"start_{role}.exe"
-    repo = str(repo_dir).replace("'", "''")
-    python_path_ps = python_path.replace("'", "''")
-    script = rf"""
-$repo = '{repo}'
-$currentPid = {current_pid}
-$pythonPath = '{python_path_ps}'
-Get-CimInstance Win32_Process |
-Where-Object {{
-    $_.ProcessId -ne $currentPid -and (
-        (
-            $_.Name -match 'python|pythonw' -and
-            $_.CommandLine -and
-            $_.CommandLine -like "*{script_name}*" -and
-            $_.ExecutablePath -and
-            $_.ExecutablePath -eq $pythonPath
-        ) -or (
-            $_.ExecutablePath -and
-            $_.ExecutablePath -like "*{exe_name}*"
-        )
-    )
-}} |
-Sort-Object ProcessId -Descending |
-ForEach-Object {{
-    try {{ taskkill /PID $_.ProcessId /T /F | Out-Null }} catch {{ }}
-}}
-""".strip()
+
     subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command", script],
+        ["taskkill", "/F", "/IM", "CapsWriter-Offline.exe", "/FI", f"PID ne {current_pid}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -185,34 +176,26 @@ ForEach-Object {{
 
 
 def restart_capswriter_pair(base_dir: str, python_executable: str | None = None) -> int:
-    """Elevated helper entrypoint that restarts both CapsWriter processes."""
+    """Elevated helper entrypoint that restarts CapsWriter (single-process mode)."""
     if system() != "Windows":
         return 1
 
     repo_dir = Path(base_dir).resolve()
     python_path = str(Path(python_executable or sys.executable).resolve())
-    server_script = repo_dir / "start_server.py"
-    client_script = repo_dir / "start_client.py"
+    core_script = repo_dir / "core_client.py"
     dist_dir = repo_dir / "dist" / "CapsWriter-Offline"
-    server_exe = dist_dir / "start_server.exe"
-    client_exe = dist_dir / "start_client.exe"
-
-    use_executables = False
-    if not use_executables and (not server_script.exists() or not client_script.exists()):
-        return 1
+    core_exe = dist_dir / "CapsWriter-Offline.exe"
 
     time.sleep(1.0)
     _terminate_capswriter_processes(repo_dir)
     time.sleep(0.8)
-    if use_executables:
-        _launch_executable(server_exe, dist_dir)
+
+    if core_exe.exists():
+        _launch_executable(core_exe, dist_dir)
+    elif core_script.exists():
+        _launch_python_script(python_path, core_script, repo_dir)
     else:
-        _launch_python_script(python_path, server_script, repo_dir)
-    time.sleep(2.0)
-    if use_executables:
-        _launch_executable(client_exe, dist_dir)
-    else:
-        _launch_python_script(python_path, client_script, repo_dir)
+        return 1
     return 0
 
 

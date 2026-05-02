@@ -13,9 +13,20 @@ CapsWriter Offline Client 入口模块
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
+
+# 在 windowed 模式（console=False）下，sys.stdout/stderr 为 None，
+# 必须在任何其他导入之前处理，防止 import 时写入 None 导致崩溃
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+if sys.stdin is None:
+    sys.stdin = open(os.devnull, 'r', encoding='utf-8')
+
+import asyncio
+import logging
 import threading
 from pathlib import Path
 from platform import system
@@ -308,15 +319,40 @@ def _setup_main_window_ui(base_dir: str) -> None:
 
     from util.ui.main_window import MainWindow
     from util.ui.tray_manager import TrayManager
+    from util.ui.console_page import ConsolePage, TkinterLogHandler, TkinterConsoleFile
 
     # 创建主窗口（MainWindow 内部使用 tk.Tk，无需额外根窗口）
     _main_window = MainWindow()
+
+    # 注册 ConsolePage 并设为默认页
+    _console_page = ConsolePage(_main_window.content_area)
+    _main_window.register_page(_console_page)
+    _main_window.navigate_to("console")
+    _main_window._console_page = _console_page
+
+    # 重定向 rich console 输出到 ConsolePage
+    _console_file = TkinterConsoleFile(_console_page)
+    from util.app_state import console
+    console.file = _console_file
+
+    # 重定向 client logger 到 ConsolePage
+    _log_handler = TkinterLogHandler(_console_page)
+    _log_handler.setLevel(logger.level)
+    _log_handler.setFormatter(logging.Formatter(
+        fmt='%(asctime)s.%(msecs)03d %(levelname)-7s %(message)s',
+        datefmt='%H:%M:%S'
+    ))
+    logger.addHandler(_log_handler)
+    _main_window._log_handler = _log_handler
 
     # 拦截关闭按钮：隐藏到托盘
     _main_window.root.protocol("WM_DELETE_WINDOW", _on_main_window_close)
 
     # 设置托盘管理器
     _setup_tray_for_main_window(base_dir)
+
+    # 显示主窗口
+    _main_window.show()
 
     logger.info("主窗口 UI 初始化完成")
 

@@ -1,6 +1,6 @@
 """UI 工具模块
 
-提供 Toast 浮动消息通知和系统托盘功能。
+提供 Toast 浮动消息通知、系统托盘功能和主窗口框架。
 该模块设计为 Client 和 Server 共用，日志记录器通过注入方式加载。
 """
 import logging
@@ -39,6 +39,13 @@ def set_ui_logger(real_logger):
 
 from .toast import toast, toast_stream, ToastMessage, ToastMessageManager
 from .tray import enable_min_to_tray, stop_tray
+from .page import Page
+from .home_page import HomePage
+from .nav_bar import NavBar
+from .status_bar import StatusBar
+from .main_window import MainWindow
+from .tray_manager import TrayManager
+from .console_page import ConsolePage, TkinterLogHandler, TkinterConsoleFile
 
 __all__ = [
     'logger',
@@ -49,4 +56,13 @@ __all__ = [
     'ToastMessageManager',
     'enable_min_to_tray',
     'stop_tray',
+    'Page',
+    'HomePage',
+    'NavBar',
+    'StatusBar',
+    'MainWindow',
+    'TrayManager',
+    'ConsolePage',
+    'TkinterLogHandler',
+    'TkinterConsoleFile',
 ]

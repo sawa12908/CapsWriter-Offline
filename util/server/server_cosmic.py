@@ -1,6 +1,9 @@
 # coding: utf-8
 """
-服务端全局状态模块
+[DEPRECATED] 服务端全局状态模块
+
+process-merge 后已废弃：queue_in/queue_out 已迁移到 util/app_state.py 的 AppState，
+WebSocket 连接池已移除。本文件保留仅用于向后兼容。
 
 提供服务端运行时的全局共享状态，包括 WebSocket 连接池和消息队列。
 使用类变量实现全局状态，方便跨模块访问。

@@ -1,30 +1,36 @@
 # coding: utf-8
-"""Audio recorder pipeline for mic input."""
+"""Audio recorder pipeline for mic input.
+
+process-merge: _send_message 改为调用 RecognitionBridge.submit_audio，
+去掉 base64 编码和 JSON 序列化，音频数据以原始 bytes 传递。
+"""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import uuid
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
-import websockets
 
 from config_client import ClientConfig as Config
 from util.client.audio.file_manager import AudioFileManager
-from util.client.state import console
+from util.app_state import console
+from util.recognition_protocol import AudioTask
+from util.tools.asyncio_to_thread import to_thread
 from . import logger
 
 if TYPE_CHECKING:
-    from util.client.state import ClientState
+    from util.app_state import AppState
+
+# 目标采样率（识别模型要求）
+TARGET_SAMPLE_RATE = 16000
 
 
 class AudioRecorder:
     """Manage one full hold-to-talk recording session."""
 
-    def __init__(self, state: 'ClientState'):
+    def __init__(self, state: 'AppState'):
         self.state = state
         self.task_id: Optional[str] = None
         self._file_manager: Optional[AudioFileManager] = None
@@ -44,6 +50,29 @@ class AudioRecorder:
         channel_rms = np.sqrt(np.mean(np.square(data, dtype=np.float32), axis=0))
         best_idx = int(np.argmax(channel_rms))
         return data[:, best_idx].astype(np.float32, copy=False)
+
+    def _get_source_sample_rate(self) -> int:
+        """获取当前音频流的实际采样率"""
+        manager = getattr(self.state, 'stream_manager', None)
+        if manager is not None:
+            return getattr(manager, 'current_sample_rate', 48000)
+        return 48000
+
+    @staticmethod
+    def _resample_to_16k(data: np.ndarray, src_rate: int) -> np.ndarray:
+        """将音频转单声道并重采样到 16kHz（纯 numpy 实现，无 scipy 依赖）"""
+        mono = AudioRecorder._to_mono(data)
+        if mono.size == 0:
+            return mono
+        if src_rate == TARGET_SAMPLE_RATE:
+            return mono
+        target_len = int(len(mono) * TARGET_SAMPLE_RATE / src_rate)
+        # 使用线性插值重采样，对语音识别足够精确
+        src_indices = np.linspace(0, len(mono) - 1, target_len)
+        lo = np.floor(src_indices).astype(np.intp)
+        hi = np.clip(lo + 1, 0, len(mono) - 1)
+        frac = src_indices - lo
+        return (mono[lo] * (1 - frac) + mono[hi] * frac).astype(np.float32)
 
     def _is_low_energy(self, data: np.ndarray) -> bool:
         if not getattr(Config, 'noise_gate_enabled', False):
@@ -91,38 +120,32 @@ class AudioRecorder:
                 return True
         return False
 
-    async def _send_message(self, message: dict) -> None:
-        websocket = self.state.websocket
+    def _send_message(self, task: AudioTask) -> None:
+        """
+        提交音频任务到识别桥接层（替代 WebSocket 发送）
 
-        if websocket is None:
-            if message['is_final']:
-                self.state.pop_audio_file(message['task_id'])
-                console.print('    server not connected, cannot send\n')
-                logger.warning('server not connected, cannot send audio')
+        process-merge: 不再通过 WebSocket 发送 JSON + base64，
+        改为直接调用 RecognitionBridge.submit_audio 传递原始 AudioTask。
+        """
+        bridge = getattr(self.state, '_bridge', None)
+
+        if bridge is None:
+            if task.is_final:
+                self.state.pop_audio_file(task.task_id)
+                logger.warning('RecognitionBridge not available, cannot send audio')
             return
 
         try:
-            if hasattr(websocket, 'closed') and websocket.closed:
-                if message['is_final']:
-                    self.state.pop_audio_file(message['task_id'])
-                    console.print('    server connection closed\n')
-                    logger.error('server connection closed')
+            if not self.state.model_loaded:
+                if task.is_final:
+                    self.state.pop_audio_file(task.task_id)
+                    logger.warning('模型未加载完成，无法发送音频')
                 return
 
-            await websocket.send(json.dumps(message))
+            bridge.submit_audio(task)
 
-        except websockets.ConnectionClosedError:
-            if message['is_final']:
-                self.state.pop_audio_file(message['task_id'])
-                console.print('[red]connection lost')
-                logger.error('websocket connection lost')
-        except websockets.ConnectionClosedOK:
-            if message['is_final']:
-                self.state.pop_audio_file(message['task_id'])
-                console.print('[yellow]connection closed')
-                logger.info('websocket connection closed')
         except Exception as e:
-            logger.error(f'failed to send audio message: {e}', exc_info=True)
+            logger.error(f'failed to submit audio task: {e}', exc_info=True)
 
     async def record_and_send(self) -> None:
         try:
@@ -143,6 +166,14 @@ class AudioRecorder:
             max_seen_rms = 0.0
             max_seen_peak = 0.0
 
+            # 音频分段缓冲：累积重采样后的音频字节，达到 seg_duration 后才发送给识别器
+            # 识别器的 encode_audio 会将短音频填充到 30s，小块音频会导致模型在静音中识别
+            seg_duration = float(Config.mic_seg_duration)
+            seg_overlap = float(Config.mic_seg_overlap)
+            seg_threshold = seg_duration + seg_overlap * 2
+            audio_buffer = bytearray()
+            buffer_offset = 0.0  # 当前缓冲区的起始偏移（秒）
+
             file_path = None
             if Config.save_audio:
                 self._file_manager = AudioFileManager()
@@ -158,23 +189,47 @@ class AudioRecorder:
                     self.state.register_audio_file(self.task_id, file_path)
                     logger.debug(f'create audio file: {file_path}')
 
-                self._duration += len(data) / 48000
+                self._duration += len(data) / self._get_source_sample_rate()
                 if Config.save_audio and self._file_manager:
                     self._file_manager.write(data)
 
-                message = {
-                    'task_id': self.task_id,
-                    'seg_duration': Config.mic_seg_duration,
-                    'seg_overlap': Config.mic_seg_overlap,
-                    'is_final': False,
-                    'time_start': self._start_time,
-                    'time_frame': time_frame,
-                    'source': 'mic',
-                    'data': base64.b64encode(self._to_mono(data[::3]).tobytes()).decode('utf-8'),
-                    'context': Config.context,
-                }
-                asyncio.create_task(self._send_message(message))
                 has_sent_audio = True
+
+            def _buffer_resampled_and_send(data: np.ndarray, time_frame: float) -> None:
+                """将重采样后的音频累积到缓冲区，达到阈值后分段发送给识别器"""
+                nonlocal buffer_offset
+
+                resampled = self._resample_to_16k(data, self._get_source_sample_rate())
+                if resampled.size == 0:
+                    return
+
+                audio_buffer.extend(resampled.tobytes())
+
+                # 计算缓冲区当前时长（float32, 16000Hz, mono = 64000 bytes/s）
+                buffer_duration = len(audio_buffer) / 64000.0
+
+                # 达到分段阈值时，切出片段发送
+                segment_bytes = int((seg_duration + seg_overlap) * 64000)
+                stride_bytes = int(seg_duration * 64000)
+
+                while buffer_duration >= seg_threshold:
+                    segment_data = bytes(audio_buffer[:segment_bytes])
+                    del audio_buffer[:stride_bytes]
+
+                    task = AudioTask(
+                        task_id=self.task_id,
+                        source='mic',
+                        data=segment_data,
+                        offset=buffer_offset,
+                        overlap=seg_overlap,
+                        is_final=False,
+                        time_start=self._start_time,
+                        time_submit=time_frame,
+                        context=Config.context,
+                    )
+                    self._send_message(task)
+                    buffer_offset += seg_duration
+                    buffer_duration = len(audio_buffer) / 64000.0
 
             def _flush_pending(time_frame: float) -> None:
                 nonlocal pending_chunks_count, pending_duration
@@ -186,6 +241,7 @@ class AudioRecorder:
                 pending_chunks_count = 0
                 pending_duration = 0.0
                 _send_audio_chunk(data, time_frame)
+                _buffer_resampled_and_send(data, time_frame)
 
             def _buffer_or_send(data: np.ndarray, time_frame: float, stage: str) -> None:
                 nonlocal pending_chunks_count, pending_duration
@@ -194,11 +250,12 @@ class AudioRecorder:
 
                 if has_sent_audio:
                     _send_audio_chunk(data, time_frame)
+                    _buffer_resampled_and_send(data, time_frame)
                     return
 
                 pending_chunks.append(data)
                 pending_chunks_count += 1
-                pending_duration += len(data) / 48000
+                pending_duration += len(data) / self._get_source_sample_rate()
 
                 if (
                     pending_chunks_count >= min_effective_chunks
@@ -216,8 +273,7 @@ class AudioRecorder:
                         f'duration={pending_duration:.3f}/{min_effective_duration:.3f}s'
                     )
 
-            while task := await self.state.queue_in.get():
-                self.state.queue_in.task_done()
+            while task := await to_thread(self.state.control_queue.get):
 
                 if task['type'] == 'begin':
                     self._start_time = task['time']
@@ -274,7 +330,7 @@ class AudioRecorder:
                     console.print(f'    录音时长：{self._duration:.2f}s')
                     logger.info(f'record task done, task_id={self.task_id}, duration={self._duration:.2f}s')
 
-                    if not has_sent_audio:
+                    if not has_sent_audio and len(audio_buffer) == 0:
                         logger.info(f'task_id={self.task_id} no effective audio, skip final send')
                         logger.info(
                             f'task_id={self.task_id} peak/rms observed: '
@@ -290,18 +346,40 @@ class AudioRecorder:
                                 logger.debug(f'failed to delete dropped audio file: {e}')
                         break
 
-                    message = {
-                        'task_id': self.task_id,
-                        'seg_duration': 15,
-                        'seg_overlap': 2,
-                        'is_final': True,
-                        'time_start': self._start_time,
-                        'time_frame': task['time'],
-                        'source': 'mic',
-                        'data': '',
-                        'context': Config.context,
-                    }
-                    asyncio.create_task(self._send_message(message))
+                    # 发送缓冲区中剩余的音频（最后一段，可能不足 seg_duration）
+                    if len(audio_buffer) > 0:
+                        remaining_data = bytes(audio_buffer)
+                        audio_buffer.clear()
+                        remaining_task = AudioTask(
+                            task_id=self.task_id,
+                            source='mic',
+                            data=remaining_data,
+                            offset=buffer_offset,
+                            overlap=seg_overlap,
+                            is_final=False,
+                            time_start=self._start_time,
+                            time_submit=task['time'],
+                            context=Config.context,
+                        )
+                        self._send_message(remaining_task)
+                        logger.debug(
+                            f'发送剩余音频: {len(remaining_data)} bytes '
+                            f'({len(remaining_data) / 64000.0:.2f}s)'
+                        )
+
+                    # process-merge: 使用 AudioTask 替代 dict
+                    final_task = AudioTask(
+                        task_id=self.task_id,
+                        source='mic',
+                        data=b'',  # 最终消息无音频数据
+                        offset=self._duration,
+                        overlap=Config.mic_seg_overlap,
+                        is_final=True,
+                        time_start=self._start_time,
+                        time_submit=task['time'],
+                        context=Config.context,
+                    )
+                    self._send_message(final_task)
                     break
 
         except Exception as e:

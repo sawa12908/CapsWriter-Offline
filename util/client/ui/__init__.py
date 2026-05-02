@@ -21,6 +21,10 @@ _SHARED_EXPORTS = {
     "ToastMessageManager",
     "enable_min_to_tray",
     "stop_tray",
+    "MainWindow",
+    "Page",
+    "HomePage",
+    "TrayManager",
 }
 
 _MENU_EXPORTS = {
@@ -67,6 +71,10 @@ __all__ = [
     "ToastMessageManager",
     "enable_min_to_tray",
     "stop_tray",
+    "MainWindow",
+    "Page",
+    "HomePage",
+    "TrayManager",
     "on_add_rectify_record",
     "on_add_hotword",
     "on_edit_context",

@@ -1,6 +1,10 @@
 # coding: utf-8
 """
-通信协议模块
+[DEPRECATED] 通信协议模块
+
+process-merge 后已废弃：AudioMessage / RecognitionResult 已被
+util/recognition_protocol.py 的 AudioTask / RecognitionOutput 替代。
+本文件保留仅用于向后兼容。
 
 定义客户端与服务端之间的消息协议数据类。
 这些类同时用于服务端和客户端，确保消息格式一致。

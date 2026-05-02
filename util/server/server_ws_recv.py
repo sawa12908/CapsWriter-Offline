@@ -1,6 +1,10 @@
 # coding: utf-8
 """
-WebSocket 接收处理模块
+[DEPRECATED] WebSocket 接收处理模块
+
+process-merge 后已废弃：AudioCache 和分段逻辑已提取到 util/audio_segmenter.py，
+WebSocket 接收已被 RecognitionBridge._consume_loop 替代。
+本文件保留仅用于向后兼容。
 
 处理客户端发送的音频数据，进行分段和缓冲，提交到识别队列。
 """

@@ -2,11 +2,14 @@
 import re
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import TYPE_CHECKING, Dict, Any, Union
 
 from config_client import ClientConfig as Config
 from util.tools import srt_from_txt
 from . import logger
+
+if TYPE_CHECKING:
+    from util.recognition_protocol import RecognitionOutput
 
 class ResultHandler:
     """结果处理器：负责文本格式化和文件保存"""
@@ -23,11 +26,11 @@ class ResultHandler:
         parts = re.split(r'([，。？]|[.,?!](?:\s+|$))', text)
         lines = []
         buffer = ""
-        
+
         # 强标点（必须换行）
         strong_punct = {'。', '？', '.', '?', '!'}
         punct_chars = set(r'，。？,.?!')
-        
+
         for part in parts:
             clean_part = part.strip()
             # 如果是标点符号（长度为1且在列表中）
@@ -41,7 +44,7 @@ class ResultHandler:
             else:
                 # 是文本
                 buffer += part
-        
+
         if buffer:
             lines.append(buffer)
 
@@ -54,22 +57,32 @@ class ResultHandler:
                 line = line[:-1].strip()
             if line:
                 final_lines.append(line)
-            
+
         return "\n".join(final_lines)
 
     @classmethod
-    def save_results(cls, file: Path, message: Dict[str, Any]) -> str:
+    def save_results(cls, file: Path, message: Union[Dict[str, Any], 'RecognitionOutput']) -> str:
         """
         保存转录结果到文件
-        
+
+        process-merge: 支持 RecognitionOutput 数据类（优先）和旧的 dict 格式。
+
         Returns:
             split_text: 切分后的文本（用于显示）
         """
-        text_display = message['text']
-        text_accu = message.get('text_accu', message['text'])
-        text_split = cls.smart_split(text_accu)
-        timestamps = message['timestamps']
-        tokens = message['tokens']
+        # process-merge: 兼容 RecognitionOutput 数据类和旧的 dict 格式
+        if hasattr(message, 'text'):
+            # RecognitionOutput 数据类
+            text_display = message.text
+            text_accu = getattr(message, 'text_accu', message.text) or message.text
+            timestamps = message.timestamps
+            tokens = message.tokens
+        else:
+            # 旧的 dict 格式（向后兼容）
+            text_display = message['text']
+            text_accu = message.get('text_accu', message['text'])
+            timestamps = message['timestamps']
+            tokens = message['tokens']
         
         # 文件名
         json_filename = file.with_suffix('.json')

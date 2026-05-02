@@ -1,3 +1,6 @@
+# [DEPRECATED] process-merge 后已废弃
+# 结果消费和 WebSocket 发送逻辑已迁移到 RecognitionBridge._consume_loop。
+# 本文件保留仅用于向后兼容。
 import json
 import base64
 import asyncio

@@ -1,4 +1,10 @@
 # coding: utf-8
+"""
+客户端组件初始化模块
+
+负责初始化热词、LLM、音频流、快捷键等业务组件。
+注意：托盘初始化已移至 core_client.py（主窗口模式下由 TrayManager 管理）。
+"""
 
 import os
 import sys
@@ -7,185 +13,43 @@ from platform import system
 
 from config_client import ClientConfig as Config
 from util.client.audio import AudioStreamManager
-from util.client.cleanup import request_exit_from_tray
 from util.client.shortcut.shortcut_config import Shortcut
 from util.client.shortcut.shortcut_manager import ShortcutManager
-from util.client.state import get_state
+from util.app_state import get_state
 from util.client.ui import RecordingIndicator, TipsDisplay
 from util.hotword import get_hotword_manager
 from util.llm.llm_handler import init_llm_system
 from util.tools.empty_working_set import empty_current_working_set
-from util.tools.windows_privilege import is_process_elevated, request_admin_restart
+from util.tools.windows_privilege import is_process_elevated
 
 from . import logger
 
 
-def _setup_tray(state, base_dir):
-    """Initialize tray actions for the client."""
-    try:
-        from util.client.ui import enable_min_to_tray
-    except ImportError as e:
-        logger.warning(f"tray module import failed, skip tray features: {e}")
-        return
-
-    def _toast(message: str, duration: int = 2200, bg: str = "#075077") -> None:
-        try:
-            from util.client.ui import toast
-
-            toast(message, duration=duration, bg=bg)
-        except Exception:
-            logger.info(message)
-
-    def restart_audio():
-        manager = state.stream_manager
-        if not manager:
-            _toast("Audio stream is not ready yet.", bg="#8a3a2f")
-            return
-        manager.reopen(reason="tray:restart-audio")
-        logger.info("user requested audio restart from tray")
-
-    def restart_capswriter():
-        logger.info("user requested full restart from tray")
-        ok = request_admin_restart(base_dir=base_dir, python_executable=sys.executable)
-        if not ok:
-            _toast("Restart request failed. Please try again as administrator.", duration=3200, bg="#8a3a2f")
-            logger.warning("tray restart request failed to launch elevated helper")
-            return
-
-        _toast("Restarting CapsWriter client and server as administrator...", duration=2600)
-        from util.common.lifecycle import lifecycle
-        lifecycle.request_shutdown(reason="Tray Restart")
-
-    def clear_memory():
-        from util.llm.llm_handler import clear_llm_history
-
-        clear_llm_history()
-        _toast("Memory cleared: all role chat history removed.", duration=3000)
-
-    def add_hotword():
-        try:
-            from util.client.ui import on_add_hotword
-
-            on_add_hotword()
-        except ImportError as e:
-            logger.warning(f"failed to import hotword menu handler: {e}")
-
-    def add_rectify():
-        try:
-            from util.client.ui import on_add_rectify_record
-
-            on_add_rectify_record()
-        except ImportError as e:
-            logger.warning(f"failed to import rectify menu handler: {e}")
-
-    def add_context():
-        try:
-            from util.client.ui import on_edit_context
-
-            on_edit_context()
-        except ImportError as e:
-            logger.warning(f"failed to import context menu handler: {e}")
-
-    def copy_last_result():
-        text = state.last_output_text
-        if text:
-            from util.llm.llm_clipboard import copy_to_clipboard
-
-            copy_to_clipboard(text)
-
-    # 开机启动
-    try:
-        from util.tools.startup_manager import is_startup_enabled, set_startup
-
-        has_startup = True
-    except Exception as e:
-        logger.debug(f"startup manager import failed: {e}")
-        has_startup = False
-
-    def toggle_startup(icon, item):
-        if not has_startup:
-            return
-        current = is_startup_enabled()
-        success = set_startup(not current, base_dir)
-        if success:
-            status = "已启用" if not current else "已取消"
-            _toast(f"开机启动 {status}")
-            logger.info(f"startup toggled: {not current}")
-        else:
-            _toast("设置开机启动失败", bg="#8a3a2f")
-            logger.warning("failed to toggle startup setting")
-
-    icon_path = os.path.join(base_dir, "assets", "icon.ico")
-    more_options = [
-        ("复制上次结果", copy_last_result),
-        ("编辑上下文", add_context),
-        ("添加热词", add_hotword),
-        ("添加纠错", add_rectify),
-        ("清空记忆", clear_memory),
-        ("重启音频", restart_audio),
-        ("重启软件", restart_capswriter),
-    ]
-    if has_startup:
-        more_options.insert(0, ("开机启动", toggle_startup, lambda item: is_startup_enabled()))
-
-    enable_min_to_tray(
-        "CapsWriter 客户端",
-        icon_path,
-        exit_callback=request_exit_from_tray,
-        more_options=more_options,
-    )
-    logger.info("tray icon enabled")
-
-
 def _notify_windows_privilege_status() -> None:
-    """Warn when the client is not elevated on Windows."""
+    """Log privilege status (auto-elevation handled by init_mic)."""
     if system() != "Windows":
         return
 
     if is_process_elevated():
         logger.info("client privilege: elevated (administrator)")
-        return
-
-    warning = (
-        "当前客户端未以管理员身份运行；如果前台程序本身是管理员权限、任务管理器、"
-        "某些游戏或独占输入程序，后台全局快捷键可能无法触发。"
-    )
-    guidance = "如遇到这类场景，请以管理员身份重新启动客户端。"
-    logger.warning(f"{warning}{guidance}")
-
-    try:
-        from util.client.state import console
-
-        console.print(f"[bold yellow]权限提醒[/]：{warning}")
-        console.print(f"[yellow]{guidance}[/]")
-    except Exception as e:
-        logger.debug(f"print privilege warning skipped: {e}")
-
-    try:
-        from util.client.ui import toast
-
-        toast(
-            "当前客户端不是管理员。若在管理员程序或游戏里后台热键失效，请以管理员身份运行客户端。",
-            duration=5500,
-            bg="#8a3a2f",
-        )
-    except Exception as e:
-        logger.debug(f"toast privilege warning skipped: {e}")
+    else:
+        logger.warning("client running without administrator privileges")
 
 
 def setup_client_components(base_dir):
+    """
+    初始化客户端业务组件（在 asyncio 线程中调用）
+
+    注意：state.initialize() 和托盘初始化已由 core_client.py 处理。
+    本函数只负责热词、LLM、音频流、快捷键等业务组件的初始化。
+    """
     state = get_state()
-    state.initialize()
 
-    # 1) Tray
-    if Config.enable_tray:
-        _setup_tray(state, base_dir)
-
-    # 2) Startup tips
+    # 1) Startup tips
     TipsDisplay.show_mic_tips()
     _notify_windows_privilege_status()
 
-    # 2.1) Recording indicator
+    # 2) Recording indicator
     try:
         state.recording_indicator = RecordingIndicator()
         logger.info("recording indicator enabled")

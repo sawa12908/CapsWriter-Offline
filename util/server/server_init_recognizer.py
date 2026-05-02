@@ -51,6 +51,14 @@ def signal_handler(signum, frame):
 def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id, stdin_fn):
     global _resources_initialized
 
+    # Windows: 隐藏子进程控制台窗口（EXE 为 console=False 但 multiprocessing 可能弹出窗口）
+    if system() == 'Windows':
+        try:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+        except Exception:
+            pass
+
     logger.info("识别子进程启动")
     logger.debug(f"系统平台: {system()}")
     sys.stdin=os.fdopen(stdin_fn)

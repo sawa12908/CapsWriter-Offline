@@ -15,7 +15,7 @@ import time
 import wave
 from os import makedirs
 from pathlib import Path
-from subprocess import DEVNULL, PIPE, Popen
+from subprocess import CREATE_NO_WINDOW, DEVNULL, PIPE, Popen
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -91,7 +91,7 @@ class AudioFileManager:
                 '-b:a', '192k',
                 str(file_path),
             ]
-            file_handle = Popen(ffmpeg_command, stdin=PIPE, stdout=DEVNULL, stderr=DEVNULL)
+            file_handle = Popen(ffmpeg_command, stdin=PIPE, stdout=DEVNULL, stderr=DEVNULL, creationflags=CREATE_NO_WINDOW)
             logger.debug(f"创建 MP3 文件: {file_path}")
         else:
             # 使用 wave 模块输出 WAV

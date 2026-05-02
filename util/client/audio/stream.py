@@ -52,6 +52,7 @@ class AudioStreamManager:
         self._default_input_signature: Optional[DeviceSignature] = None
         self._current_input_index: Optional[int] = None
         self._current_input_name = "unknown"
+        self.current_sample_rate: int = self.SAMPLE_RATE  # actual rate of opened stream
 
         # Debounce reopen requests from system events.
         self._last_event_reopen_ts = 0.0
@@ -81,16 +82,13 @@ class AudioStreamManager:
 
         self.state.mark_recording_audio_started(time.time())
 
-        if self.state.loop and self.state.queue_in:
-            asyncio.run_coroutine_threadsafe(
-                self.state.queue_in.put(
-                    {
-                        "type": "data",
-                        "time": time.time(),
-                        "data": indata.copy(),
-                    }
-                ),
-                self.state.loop,
+        if self.state.control_queue:
+            self.state.control_queue.put(
+                {
+                    "type": "data",
+                    "time": time.time(),
+                    "data": indata.copy(),
+                }
             )
 
     def _on_stream_finished(self) -> None:
@@ -789,6 +787,7 @@ class AudioStreamManager:
                 else:
                     self._listener_mode = None
 
+                self.current_sample_rate = int(used_rate)
                 console.print(
                     f"using input device: {actual_name}, channels: {used_channels}",
                     end="\n\n",

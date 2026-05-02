@@ -1,3 +1,7 @@
+# [DEPRECATED] process-merge 后已废弃
+# Server 的 WebSocket 服务 + Recognizer 子进程管理已嵌入 Client 进程，
+# 通过 RecognitionBridge + multiprocessing.Queue 通信。
+# 本文件保留仅用于向后兼容，新代码不应使用。
 import os
 from platform import system
 import asyncio

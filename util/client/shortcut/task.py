@@ -179,10 +179,7 @@ class ShortcutTask:
         self._cancel_pending_release()
         self.recording_start_time = time.time()
         self.is_recording = True
-        asyncio.run_coroutine_threadsafe(
-            self.state.queue_in.put({'type': 'begin', 'time': self.recording_start_time, 'data': None}),
-            self.state.loop
-        )
+        self.state.control_queue.put({'type': 'begin', 'time': self.recording_start_time, 'data': None})
 
         self.state.start_recording(self.recording_start_time)
         self._status.start()
@@ -223,14 +220,8 @@ class ShortcutTask:
         self.state.stop_recording()
         self._status.stop()
 
-        asyncio.run_coroutine_threadsafe(
-            self.state.queue_in.put({
-                'type': 'finish',
-                'time': time.time(),
-                'data': None
-            }),
-            self.state.loop
-        )
+        # 发送 finish 信号到 queue_in，通知 record_and_send 协程结束
+        self.state.control_queue.put({'type': 'finish', 'time': time.time(), 'data': None})
 
         # Sync input stream after the current record so next trigger follows system default
         # without delaying hotkey-to-record latency.
