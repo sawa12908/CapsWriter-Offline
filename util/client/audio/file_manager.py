@@ -39,13 +39,14 @@ class AudioFileManager:
     - 重命名：根据识别文本重命名文件
     """
     
-    SAMPLE_RATE = 48000
+    DEFAULT_SAMPLE_RATE = 48000
     
     def __init__(self):
         """初始化音频文件管理器"""
         self.file_path: Optional[Path] = None
         self.file_handle: Optional[AudioWriter] = None
         self.channels: int = 1
+        self.sample_rate: int = self.DEFAULT_SAMPLE_RATE
         self._has_ffmpeg = shutil.which('ffmpeg') is not None
         
         if self._has_ffmpeg:
@@ -53,18 +54,25 @@ class AudioFileManager:
         else:
             logger.debug("未检测到 FFmpeg，将使用 WAV 格式保存录音")
     
-    def create(self, channels: int, time_start: float) -> Tuple[Path, AudioWriter]:
+    def create(
+        self,
+        channels: int,
+        time_start: float,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+    ) -> Tuple[Path, AudioWriter]:
         """
         创建音频文件
         
         Args:
             channels: 音频声道数
             time_start: 录音开始时间戳
+            sample_rate: 原始录音采样率
             
         Returns:
             (文件路径, 文件写入句柄) 元组
         """
         self.channels = channels
+        self.sample_rate = int(sample_rate or self.DEFAULT_SAMPLE_RATE)
         
         # 构建目录和文件名
         local_time = time.localtime(time_start)
@@ -85,7 +93,7 @@ class AudioFileManager:
             ffmpeg_command = [
                 'ffmpeg', '-y',
                 '-f', 'f32le',
-                '-ar', str(self.SAMPLE_RATE),
+                '-ar', str(self.sample_rate),
                 '-ac', str(channels),
                 '-i', '-',
                 '-b:a', '192k',
@@ -99,7 +107,7 @@ class AudioFileManager:
             file_handle = wave.open(str(file_path), 'w')
             file_handle.setnchannels(channels)
             file_handle.setsampwidth(2)  # 16-bit
-            file_handle.setframerate(self.SAMPLE_RATE)
+            file_handle.setframerate(self.sample_rate)
             logger.debug(f"创建 WAV 文件: {file_path}")
         
         self.file_path = file_path

@@ -190,7 +190,10 @@ def restart_capswriter_pair(base_dir: str, python_executable: str | None = None)
     _terminate_capswriter_processes(repo_dir)
     time.sleep(0.8)
 
-    if core_exe.exists():
+    python_name = Path(python_path).name.lower()
+    if core_script.exists() and python_name in {"python.exe", "pythonw.exe"}:
+        _launch_python_script(python_path, core_script, repo_dir)
+    elif core_exe.exists():
         _launch_executable(core_exe, dist_dir)
     elif core_script.exists():
         _launch_python_script(python_path, core_script, repo_dir)

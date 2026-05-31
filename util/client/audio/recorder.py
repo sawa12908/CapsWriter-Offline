@@ -185,7 +185,11 @@ class AudioRecorder:
 
                 if Config.save_audio and self._file_manager and file_path is None:
                     channels = data.shape[1] if data.ndim > 1 else 1
-                    file_path, _ = self._file_manager.create(channels, self._start_time)
+                    file_path, _ = self._file_manager.create(
+                        channels,
+                        self._start_time,
+                        self._get_source_sample_rate(),
+                    )
                     self.state.register_audio_file(self.task_id, file_path)
                     logger.debug(f'create audio file: {file_path}')
 
@@ -215,13 +219,17 @@ class AudioRecorder:
                 while buffer_duration >= seg_threshold:
                     segment_data = bytes(audio_buffer[:segment_bytes])
                     del audio_buffer[:stride_bytes]
+                    segment_overlap = 0.0 if buffer_offset <= 0 else min(
+                        seg_overlap,
+                        len(segment_data) / 64000.0,
+                    )
 
                     task = AudioTask(
                         task_id=self.task_id,
                         source='mic',
                         data=segment_data,
                         offset=buffer_offset,
-                        overlap=seg_overlap,
+                        overlap=segment_overlap,
                         is_final=False,
                         time_start=self._start_time,
                         time_submit=time_frame,
@@ -350,12 +358,16 @@ class AudioRecorder:
                     if len(audio_buffer) > 0:
                         remaining_data = bytes(audio_buffer)
                         audio_buffer.clear()
+                        remaining_overlap = 0.0 if buffer_offset <= 0 else min(
+                            seg_overlap,
+                            len(remaining_data) / 64000.0,
+                        )
                         remaining_task = AudioTask(
                             task_id=self.task_id,
                             source='mic',
                             data=remaining_data,
                             offset=buffer_offset,
-                            overlap=seg_overlap,
+                            overlap=remaining_overlap,
                             is_final=False,
                             time_start=self._start_time,
                             time_submit=task['time'],
@@ -373,7 +385,7 @@ class AudioRecorder:
                         source='mic',
                         data=b'',  # 最终消息无音频数据
                         offset=self._duration,
-                        overlap=Config.mic_seg_overlap,
+                        overlap=0.0,
                         is_final=True,
                         time_start=self._start_time,
                         time_submit=task['time'],
